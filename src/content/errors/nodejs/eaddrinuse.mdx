@@ -1,0 +1,159 @@
+---
+service: nodejs
+code: EADDRINUSE
+slug: eaddrinuse
+title: "Node.js Error: EADDRINUSE — Port Already In Use (Cause + Fix)"
+plainTitle: Address Already In Use
+category: network
+severity: medium
+tldrCause: Your Node process tried to bind a TCP port (e.g., 3000) that another process is already listening on. The OS returns EADDRINUSE because two processes can't bind the same address+port. Often it's the previous instance of your own server that didn't shut down cleanly.
+tldrFix: "Find what's using the port (`lsof -i :3000` on Mac/Linux, `netstat -ano | findstr :3000` on Windows), kill it, and restart. Long-term: handle SIGTERM/SIGINT to close the server cleanly, and avoid hardcoding ports in dev — use `PORT=0` to let the OS pick one."
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    Error: listen EADDRINUSE: address already in use :::3000
+        at Server.setupListenHandle [as _listen2] (node:net:1817:16)
+        at listenInCluster (node:net:1865:12)
+        at Server.listen (node:net:1953:7) {
+      code: 'EADDRINUSE',
+      errno: -98,
+      syscall: 'listen',
+      address: '::',
+      port: 3000
+    }
+  caption: The address `::` (IPv6 wildcard) and the port number tell you exactly what's contended. The port is the actionable bit.
+causes:
+  - title: Previous dev-server process still running
+    body: "Most common locally — you killed the terminal tab but the Node process kept running, or a hot-reload tool (`nodemon`, `tsx watch`) spawned a child that didn't get cleaned up. The shell shows you back at a prompt but `lsof` shows the port still bound."
+  - title: Another app on your machine uses the same port
+    body: "Port 3000 is shared by Next.js, Create React App, Rails dev server, and dozens of others. Port 8080 is shared by Tomcat, dev servers, Jenkins. Two services configured for the same port collide on the second one to start."
+  - title: Multiple cluster workers binding the same port without cluster module
+    body: "If you `node app.js` twice (or accidentally launch two replicas locally) and your app calls `server.listen(3000)`, the second one fails. The Node `cluster` module + `SO_REUSEPORT` is what allows multiple workers to share a port; without it, you get EADDRINUSE."
+  - title: Lingering TIME_WAIT socket from the previous bind
+    body: "Less common with modern Node (which sets `SO_REUSEADDR` by default), but possible after a hard kill: the TCP stack keeps the socket in TIME_WAIT for ~60s. New `listen()` fails with EADDRINUSE until the wait expires."
+  - title: Container port mapping conflict
+    body: "`docker run -p 3000:3000` fails if anything on the host already binds 3000 — Docker can't map the port. The error message comes from Docker, not Node, but reads similarly."
+fixes:
+  - title: Find and kill the process holding the port
+    likelihood: high
+    body: |
+      `lsof` on Mac/Linux, `netstat` on Windows. Both give you the PID; kill it and restart your dev server.
+    code:
+      language: bash
+      filename: free-port.sh
+      code: |
+        # Mac / Linux
+        lsof -i :3000
+        # COMMAND   PID USER   FD  TYPE             DEVICE  SIZE/OFF NODE NAME
+        # node    12345 you   25u  IPv6 0x...        0t0      TCP *:hbci (LISTEN)
+        kill -9 12345
+
+        # Or in one line:
+        kill -9 $(lsof -t -i :3000)
+
+        # Windows (PowerShell or cmd)
+        # netstat -ano | findstr :3000
+        # taskkill /PID 12345 /F
+  - title: Handle SIGTERM/SIGINT so the server shuts down cleanly
+    likelihood: high
+    body: |
+      The right long-term fix: register signal handlers that close the server before the process exits. Containers send SIGTERM on stop; CTRL-C sends SIGINT. Closing the server frees the port immediately.
+    code:
+      language: typescript
+      filename: server.ts
+      code: |
+        import http from 'node:http';
+
+        const server = http.createServer((req, res) => {
+          res.end('hello');
+        });
+
+        server.listen(Number(process.env.PORT ?? 3000));
+
+        function shutdown(signal: string) {
+          console.log(`received ${signal}, shutting down…`);
+          server.close((err) => {
+            if (err) {
+              console.error('error closing server', err);
+              process.exit(1);
+            }
+            process.exit(0);
+          });
+          // Hard exit if close hangs.
+          setTimeout(() => process.exit(1), 10_000).unref();
+        }
+
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        process.on('SIGINT', () => shutdown('SIGINT'));
+  - title: Use `PORT=0` to let the OS pick a free port
+    likelihood: medium
+    body: |
+      In tests and ephemeral dev scenarios, binding to port 0 tells the OS "give me any free port." Read the actual port back from `server.address()`. Eliminates port collisions in parallel test runs.
+    code:
+      language: typescript
+      filename: server-test.ts
+      code: |
+        import http from 'node:http';
+
+        const server = http.createServer((req, res) => res.end('ok'));
+
+        server.listen(0, () => {
+          const addr = server.address();
+          if (addr && typeof addr === 'object') {
+            console.log(`test server on http://localhost:${addr.port}`);
+          }
+        });
+  - title: Configure your dev tools not to leak processes
+    likelihood: medium
+    body: |
+      `nodemon`, `tsx watch`, and `next dev` should kill their child on restart, but bugs (and weird shells) leak. Add an `npm run kill-port` script and call it before `dev`. On macOS use `pgrep -f node | xargs kill -9` cautiously.
+  - title: Pick a different port (last resort)
+    likelihood: low
+    body: |
+      `PORT=3001 npm run dev` if you genuinely have two services that both want 3000 and neither can move. Don't make this a habit — it papers over the cleanup bug.
+detection: |
+  In CI, EADDRINUSE in a parallel test suite is almost always two test files binding the same hardcoded port. Always use port 0 in tests. In production: EADDRINUSE during boot indicates the previous container didn't release the port (shared host-network mode) or your orchestrator restarted the pod faster than TIME_WAIT cleared. Set `tcp_tw_reuse=1` on Linux hosts that hit this often, or add a 30s readiness delay.
+related:
+  - econnrefused-nodejs
+  - err-require-esm-nodejs
+  - heap-out-of-memory-nodejs
+  - module-not-found-nextjs
+  - function-invocation-timeout-nextjs
+relatedGuide: nodejs-process-management
+faq:
+  - q: How do I find which process is using port 3000?
+    a: "Mac/Linux: `lsof -i :3000` or `lsof -ti :3000` for just the PID. Linux without lsof: `ss -tulpn | grep 3000` or `fuser 3000/tcp`. Windows PowerShell: `Get-NetTCPConnection -LocalPort 3000 | Select-Object OwningProcess` then `Get-Process -Id <pid>`. Once you have the PID, `kill -9 <pid>` (Unix) or `taskkill /PID <pid> /F` (Windows)."
+  - q: "Why does EADDRINUSE happen even after I quit my terminal?"
+    a: "Closing the terminal tab doesn't always kill its child processes — especially if the parent shell sent SIGHUP and the child ignored it (some Node libraries do). The orphaned Node process gets re-parented to init/launchd and keeps holding the port. Find it with `pgrep -f node` or `lsof -i :<port>` and kill it explicitly."
+  - q: Can I make my Node server listen on the same port as another instance?
+    a: "Only by using the `cluster` module or `SO_REUSEPORT`. The cluster module forks workers that share the listening socket via the master. Plain `server.listen(3000)` in two processes will collide. PM2 in cluster mode uses `cluster` under the hood; that's how it scales horizontally on one box."
+  - q: I get EADDRINUSE even though `lsof` shows nothing on the port.
+    a: "Two possibilities: (1) the socket is in TIME_WAIT — wait 60 seconds, or set `SO_REUSEADDR` (Node does this by default for TCP, but some libraries override). (2) you're binding `::` (all IPv6) and another process is on `0.0.0.0` (all IPv4) — they collide on dual-stack systems. Try binding to a specific interface like `127.0.0.1`."
+  - q: Why does docker run get EADDRINUSE but no Node process is running?
+    a: "Docker is binding the host port, not Node. Anything on the host using port 3000 — another Docker container, a dev server, even `airdrop`/Bonjour briefly — collides. Run `lsof -i :3000` on the host (not in a container) to find it. Or change the host-side port: `-p 3001:3000`."
+  - q: Should I catch EADDRINUSE and pick a different port?
+    a: "In production, no — fail loudly, because port collisions usually indicate a deployment bug. In dev tools and tests, yes: catch it, log a warning, and fall back to port 0 or the next available. The `get-port` npm package does this cleanly."
+  - q: Does PM2 / Forever / nodemon prevent EADDRINUSE?
+    a: "Partially. They send SIGINT/SIGTERM on restart, which gives your server a chance to call `server.close()` and release the port. If your code doesn't handle the signal (no shutdown handler), the OS still has to clean up, which can take seconds and produce EADDRINUSE on the next start. The fix is your shutdown handler, not the supervisor."
+  - q: Can EADDRINUSE happen with Unix sockets?
+    a: "Yes — same error, different cause. A leftover socket file (`/tmp/foo.sock`) from a previous run blocks new binds. Either unlink the file before listening (`fs.unlinkSync(sockPath)` in a try/catch), or use `server.listen({ path, exclusive: false })` after cleanup."
+escalate: |
+  EADDRINUSE is virtually always a local issue — the OS report is unambiguous. Escalate to infra only if (a) on a shared host, multiple containers consistently collide despite different configured ports (could be a host-network-mode misconfiguration), or (b) Kubernetes pods get EADDRINUSE on `hostPort` mappings (the port is reserved on the node — change the node selector or the port). Otherwise, find and kill the conflicting process.
+languages:
+  - typescript
+  - javascript
+keywords:
+  - nodejs eaddrinuse
+  - port already in use
+  - port 3000 in use
+  - node listen eaddrinuse
+  - kill node port
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`EADDRINUSE` is the OS telling you that two processes can't bind the same TCP address+port. It's a clean, deterministic error: there's exactly one fix (free the port), and exactly one long-term prevention (handle shutdown signals). The hard part is that the offending process is often invisible — your terminal closed but the Node process didn't.
+
+The first command in any EADDRINUSE debug session is `lsof -i :<port>` (or the Windows equivalent). Once you know who's holding the port, the rest is mechanical.

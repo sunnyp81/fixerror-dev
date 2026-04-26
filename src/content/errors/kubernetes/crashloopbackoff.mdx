@@ -1,0 +1,182 @@
+---
+service: kubernetes
+code: CrashLoopBackOff
+slug: crashloopbackoff
+title: "Kubernetes Error: CrashLoopBackOff — Container Restarting Repeatedly (Cause + Fix)"
+plainTitle: Crash Loop Back Off
+category: runtime
+severity: critical
+tldrCause: Your container starts, exits with a non-zero code (or is OOMKilled), the kubelet restarts it, it exits again — repeat. After several quick failures the kubelet enters CrashLoopBackOff, an exponential delay between restart attempts so you don't melt the node.
+tldrFix: "`kubectl logs <pod> --previous` to see the dying container's last words, `kubectl describe pod <pod>` for OOMKilled / liveness-probe-failed reasons, and fix the underlying crash — almost always missing config (env var, secret, mount), failed dependency (DB unreachable on boot), bad command, or insufficient memory."
+contextCode:
+  language: text
+  filename: kubectl-get-pods
+  code: |
+    NAME                       READY   STATUS             RESTARTS   AGE
+    api-7d8f6c5b9-abc12        0/1     CrashLoopBackOff   8          12m
+
+    # kubectl describe pod api-7d8f6c5b9-abc12
+    Last State:     Terminated
+      Reason:       Error
+      Exit Code:    1
+      Started:      Fri, 26 Apr 2026 09:14:32 +0100
+      Finished:     Fri, 26 Apr 2026 09:14:33 +0100
+    Events:
+      Warning  BackOff  2m (x42 over 11m)  kubelet  Back-off restarting failed container
+  caption: RESTARTS column climbing fast + Exit Code 1 + 1-second uptime — classic boot-failure crash loop.
+causes:
+  - title: Application throws on startup
+    body: "Missing env var, malformed config, code-level exception during init. `kubectl logs --previous` shows the stack trace from the dying container. The app exits with code 1 (or whatever the runtime maps the exception to) and the kubelet restarts it."
+  - title: Container OOMKilled
+    body: "Your container exceeded its memory limit and the kernel SIGKILLed it. Last State shows `Reason: OOMKilled, Exit Code: 137`. Fix is more memory in the resource request/limit, or reducing the working-set size of your app (the latter is usually right)."
+  - title: Liveness probe failing
+    body: "App boots fine but the liveness probe gets HTTP 5xx or doesn't reply within `timeoutSeconds`, so the kubelet decides the container is unhealthy and kills it. Common when the app's liveness endpoint depends on a slow downstream — make the probe shallow."
+  - title: Wrong command or arg
+    body: "Container starts but the entrypoint exits immediately. Could be a typo in `command:`, a missing binary in the image, a script that runs `exit 1`, or an init script that depends on a file that wasn't mounted yet."
+  - title: Boot-time dependency unavailable
+    body: "App connects to Postgres/Redis/etcd in its `init()` and exits if the connection fails. On a cold cluster start, the dependency may not be ready yet. The fix is retry-with-backoff in the app or a proper init container that waits."
+fixes:
+  - title: Read the previous container's logs first
+    likelihood: high
+    body: |
+      `--previous` shows logs from the last terminated instance, not the currently-failing one. This is where the actual crash reason lives — stack trace, missing env var, connection error, etc.
+    code:
+      language: bash
+      filename: diagnose.sh
+      code: |
+        # The pod is currently restarting; --previous shows the dying container's logs.
+        kubectl logs <pod> -n <namespace> --previous
+
+        # If the container has multiple containers in one pod:
+        kubectl logs <pod> -c <container-name> --previous
+
+        # Tail logs as the new instance starts (sometimes catches startup faster):
+        kubectl logs <pod> -n <namespace> -f
+  - title: Check `kubectl describe` for OOMKilled and probe failures
+    likelihood: high
+    body: |
+      The Events and Last State sections tell you whether the container exited on its own (Reason: Error, your code), got killed for memory (Reason: OOMKilled, exit 137), or was killed by the kubelet for failing a probe.
+    code:
+      language: bash
+      filename: describe.sh
+      code: |
+        kubectl describe pod <pod> -n <namespace>
+
+        # Look for these indicators:
+        #   Last State: Terminated
+        #     Reason: OOMKilled        ← memory limit
+        #     Reason: Error            ← app exited non-zero
+        #     Exit Code: 137           ← SIGKILL (OOM or kubelet)
+        #     Exit Code: 143           ← SIGTERM (graceful shutdown signal)
+        #
+        # In Events, look for:
+        #   Liveness probe failed: ...
+        #   Readiness probe failed: ...
+  - title: Bump memory limits if OOMKilled is the cause
+    likelihood: high
+    body: |
+      Don't guess — set both `requests` (what's reserved) and `limits` (the cgroup ceiling). Run with the limit raised, observe actual usage with `kubectl top pod`, then set the limit at ~30% above peak.
+    code:
+      language: yaml
+      filename: deployment.yaml
+      code: |
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: api
+        spec:
+          template:
+            spec:
+              containers:
+                - name: api
+                  image: myregistry.example/team/api:v2.3.1
+                  resources:
+                    requests:
+                      cpu: 200m
+                      memory: 512Mi
+                    limits:
+                      cpu: 1000m
+                      memory: 1Gi    # raise this if OOMKilled
+                  livenessProbe:
+                    httpGet:
+                      path: /healthz
+                      port: 8080
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+  - title: Make the liveness probe shallow and add startupProbe
+    likelihood: high
+    body: |
+      Liveness should answer "is the process alive and not deadlocked?" — not "is the database reachable?" Use a shallow `/healthz` that doesn't fan out. For slow-starting apps, add a `startupProbe` that gives lots of time before liveness kicks in.
+    code:
+      language: yaml
+      filename: probes.yaml
+      code: |
+        # Shallow liveness — just confirms the HTTP server is up.
+        livenessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+
+        # Readiness can be deeper — checks downstream deps.
+        readinessProbe:
+          httpGet: { path: /ready, port: 8080 }
+          periodSeconds: 5
+          timeoutSeconds: 3
+
+        # Startup gives slow-booting apps up to 5 minutes before liveness fires.
+        startupProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          periodSeconds: 10
+          failureThreshold: 30   # 30 * 10s = 5 minutes
+  - title: Verify config (env vars, ConfigMaps, Secrets) actually mount
+    likelihood: medium
+    body: |
+      Run `kubectl exec` against a debug pod with the same spec, or use `kubectl debug` to attach an ephemeral container, and `env` / `cat /etc/...` to confirm the config is where the app expects. Many CrashLoopBackOff incidents are a typo in a Secret name or a missing key.
+detection: |
+  Alert on `kube_pod_container_status_restarts_total` rate (Prometheus + kube-state-metrics) — a pod restarting more than ~5 times in 10 minutes is in or near CrashLoopBackOff regardless of the official phase. Pair with an OOMKill alert (`container_oom_events_total`). Track CrashLoopBackOff incidents by deployment to spot bad releases fast — a fresh deploy that immediately CrashLoops should auto-rollback.
+related:
+  - imagepullbackoff-kubernetes
+  - heap-out-of-memory-nodejs
+  - econnrefused-nodejs
+  - module-not-found-error-python
+  - function-invocation-timeout-nextjs
+relatedGuide: kubernetes-pod-debugging
+faq:
+  - q: What's the back-off interval in CrashLoopBackOff?
+    a: "Exponential, doubling each failure: 10s, 20s, 40s, 80s, 160s, 320s, capped at 5 minutes. Starts over after the container has been running for at least 10 minutes (the kubelet considers it 'recovered' at that point). The backoff is per-container, not per-pod, so multi-container pods can have one container looping while others are healthy."
+  - q: How do I see logs from a container that's restarting?
+    a: "`kubectl logs <pod> --previous` is the key flag — it shows logs from the most recently terminated container instance. Without `--previous` you get the currently-running (likely just-started, no useful logs yet) instance. For multi-container pods, add `-c <container>`. For deeper investigation, ship logs to a centralized log store (Loki, Datadog) so the previous-instance log is available even after the pod is replaced."
+  - q: My pod CrashLoopBackOffs but `kubectl logs --previous` is empty.
+    a: "The container died before logging anything — usually the entrypoint binary doesn't exist (typo in `command:`), the image's CMD points at a non-existent file, or the container can't even start (e.g., volume mount failure). Check `kubectl describe pod` Events for `Failed to start container` or `MountVolume failed`. Also try `kubectl debug` to launch an ephemeral container in the pod for inspection."
+  - q: What does Exit Code 137 mean?
+    a: "137 = 128 + 9, where 9 is SIGKILL. The container was killed forcibly. Most common cause: OOMKilled (cgroup memory limit hit, kernel kills the process). Other causes: kubelet evicting the pod, manual `kubectl delete --grace-period=0`, or the node going down. `kubectl describe pod` distinguishes — `Reason: OOMKilled` vs `Reason: Killed`."
+  - q: Should I disable the liveness probe to stop CrashLoopBackOff?
+    a: "Almost never. If liveness is failing, it's signal — your app isn't healthy. Disabling the probe just hides the issue and lets unhealthy pods receive traffic. The right fix is to make the probe accurately reflect liveness (shallow, doesn't depend on downstreams) and to fix whatever is making the app appear unhealthy."
+  - q: How is CrashLoopBackOff different from ImagePullBackOff?
+    a: "CrashLoopBackOff: the image pulled, the container started, then exited. Your code (or memory limit, or probe) is the issue. ImagePullBackOff: the kubelet couldn't even pull the image. The fix surfaces are completely different — CrashLoopBackOff lives in your app/config, ImagePullBackOff lives in your registry/auth/network."
+  - q: "Will adding restartPolicy: Never fix CrashLoopBackOff?"
+    a: "It changes the symptom but not the cause. With `restartPolicy: Never`, the pod transitions to `Failed` instead of `CrashLoopBackOff` — but the root cause (your app crashing on boot) is unchanged. For a Deployment, `restartPolicy: Always` is required anyway. Use `Never` only for one-off Job pods where you want to inspect a failed run."
+  - q: My pod CrashLoops on cold cluster start but works after a few minutes. Why?
+    a: "Boot-time dependency race — your app connects to a database/sidecar/etc. that isn't ready yet on cold start. Fix in the app: add retry-with-backoff for boot-time dependencies. Fix in K8s: add an `initContainer` that waits for the dependency (a `wait-for` script), or set `startupProbe` to give the app several minutes before liveness fires."
+escalate: |
+  Escalate to platform/SRE only after `kubectl logs --previous` and `kubectl describe pod` confirm the issue is not in your application or config — for example: (a) every container OOMKilled at exactly the same memory regardless of workload (cgroup misconfiguration), (b) liveness probes timing out because the kubelet itself is overloaded (node-level issue), or (c) the same deployment runs fine on some clusters and CrashLoopBackOffs on others (cluster-version or CRI mismatch). For 99% of CrashLoopBackOff cases, the fix lives in your application code or your YAML.
+languages:
+  - yaml
+  - bash
+keywords:
+  - kubernetes crashloopbackoff
+  - pod restarting
+  - oomkilled
+  - liveness probe failed
+  - kubectl logs previous
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`CrashLoopBackOff` is the visible symptom of an invisible loop: your container starts, exits, and starts again — over and over — until the kubelet slows down the restart cadence. It's not a single error type; it's "your app died several times in a row and we're rate-limiting you." The real error is hiding in the previous container's logs and the pod's events.
+
+The diagnostic sequence is fixed: `kubectl logs --previous` to see what the dying app said, `kubectl describe pod` to see how it died (Error vs OOMKilled vs probe-failed), then fix the right thing. Don't bump memory if the issue is a missing env var; don't disable the probe if the app genuinely isn't healthy.

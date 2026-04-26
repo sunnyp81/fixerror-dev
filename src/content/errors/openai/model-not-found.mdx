@@ -1,0 +1,137 @@
+---
+service: openai
+code: model_not_found
+slug: model-not-found
+title: "OpenAI Error: model_not_found — Model Does Not Exist or No Access (Cause + Fix)"
+plainTitle: Model Does Not Exist or No Access
+httpStatus: 404
+category: config
+severity: high
+tldrCause: "You requested a model name that either doesn't exist (typo, deprecated, renamed) or that your organisation doesn't have access to (tier-gated, geography-restricted, deprecated for new orgs)."
+tldrFix: "List available models with `client.models.list()`, fix typos, check your usage tier in the dashboard, and update deprecated model names. New OpenAI models are tier-gated: `o1` requires tier 5, `gpt-4o` is generally available, but newer experimental models may need a higher tier."
+contextCode:
+  language: python
+  filename: model_call.py
+  code: |
+    import openai
+
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4-turbo-preview-2024",   # ← deprecated alias
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+    except openai.NotFoundError as e:
+        # e.status_code == 404
+        # e.code == 'model_not_found'
+        # e.message: "The model `gpt-4-turbo-preview-2024` does not exist or you do not have access to it."
+        ...
+  caption: "OpenAI returns 404 with `model_not_found` for both 'this model never existed' and 'your org can't access this model.' Check the dashboard to disambiguate."
+causes:
+  - title: Typo or wrong casing in model name
+    body: "Model IDs are case-sensitive and exact. `GPT-4o` won't match `gpt-4o`. `gpt4o` (no hyphen) won't match. `gpt-4-turbo` is now an alias to a specific snapshot, but `gpt-4-turbo-preview` is deprecated. A single character off and the API returns 404."
+  - title: Deprecated or retired model
+    body: "OpenAI deprecates older models on a rolling schedule. `text-davinci-003`, `gpt-3.5-turbo-0301`, `gpt-4-32k`, and the original `gpt-4-vision-preview` have all been retired. Calls to retired models return `model_not_found`. The deprecation page lists current dates."
+  - title: Tier-gated model and your org isn't qualified
+    body: "Newer flagship models often gate by usage tier. `o1` historically required tier 5 ($1k+ paid). Some experimental models are limited to tier 1+ paid customers. Free-tier orgs can't see `gpt-4o` at all in some periods. The error is the same `model_not_found` even though the issue is access, not existence."
+  - title: Wrong API endpoint for the model type
+    body: "Calling `/v1/chat/completions` with an embedding model (`text-embedding-3-large`) returns `model_not_found` even though the model exists — it just doesn't serve chat. Embedding models go to `/v1/embeddings`, image models to `/v1/images/generations`, audio to `/v1/audio/*`."
+  - title: Fine-tuned model from another org or project
+    body: "Fine-tuned model IDs (`ft:gpt-4o-mini-2024-07-18:org-abc:custom-name:abc123`) are scoped to the org/project that created them. Calling them from a different org returns `model_not_found`. Project-scoped fine-tunes are also invisible to other projects in the same org."
+fixes:
+  - title: List your available models programmatically
+    likelihood: high
+    body: |
+      `client.models.list()` returns every model your API key can access. Filter by capability and pick the right one. This is also the fastest way to see if a tier-gated model is available to your org.
+    code:
+      language: python
+      filename: list_models.py
+      code: |
+        from openai import OpenAI
+        client = OpenAI()
+
+        models = client.models.list()
+        chat_models = [m.id for m in models.data if m.id.startswith(('gpt-', 'o1', 'o3'))]
+        print('Available chat models:', sorted(chat_models))
+
+        # Defensive caller:
+        def pick_model(preferred, fallback="gpt-4o-mini"):
+            available = {m.id for m in client.models.list().data}
+            return preferred if preferred in available else fallback
+  - title: Use canonical model aliases, not snapshot IDs
+    likelihood: high
+    body: |
+      Use the family alias (`gpt-4o`, `gpt-4o-mini`, `o1`) rather than dated snapshots (`gpt-4o-2024-08-06`) unless you specifically need pinning. Aliases auto-route to the current production version. Snapshots are retired on a fixed schedule and start returning `model_not_found` — usually with 6+ months notice in the deprecation policy.
+  - title: Check usage tier and request access if needed
+    likelihood: medium
+    body: |
+      Visit platform.openai.com/account/limits to see your current tier and which models are available at that tier. Tier upgrades happen automatically after $50/$100/$250/$1k+ paid + a 7-day cooling period. There's no manual exception process — only paying more works.
+  - title: Match the model to the correct endpoint
+    likelihood: medium
+    body: |
+      Embeddings → `/v1/embeddings` only. Image generation → `/v1/images/generations`. Audio transcription → `/v1/audio/transcriptions`. Realtime → WebSocket `/v1/realtime`. The model_not_found error message often hints at this; the SDK reference docs list each model's supported endpoint.
+    code:
+      language: python
+      filename: right_endpoint.py
+      code: |
+        # WRONG: chat completion with an embedding model
+        # client.chat.completions.create(model="text-embedding-3-large", ...)
+
+        # RIGHT: embeddings endpoint
+        from openai import OpenAI
+        client = OpenAI()
+        emb = client.embeddings.create(
+            model="text-embedding-3-large",
+            input="Hello world",
+        )
+  - title: Verify fine-tuned model ID and project scope
+    likelihood: low
+    body: |
+      Fine-tunes appear in Dashboard → Fine-tuning. Copy the full model ID exactly. If your code runs under a different project than the one that owns the fine-tune, either move the fine-tune to the right project or switch the API key to the owning project's scope.
+detection: |
+  Treat `model_not_found` as a critical config error, not a transient one. Alert on first occurrence per deploy — it usually means a deploy shipped with an outdated model name or a tier change broke access. Log `error.code` and the requested model name together so you can spot pattern (typo on one model vs deprecation across the board).
+related:
+  - rate-limit-exceeded
+  - insufficient-quota
+  - context-length-exceeded
+  - rate-limit-error
+  - authentication-error
+relatedHttp: 404
+relatedGuide: choosing-openai-models
+faq:
+  - q: "Why does the error say 'does not exist or you do not have access'?"
+    a: "OpenAI deliberately conflates the two for security — they don't want to leak information about which models exist that you can't see. To disambiguate, call `client.models.list()`: if the model isn't in the response and isn't in OpenAI's deprecation page, it likely never existed (typo). If it's in the deprecation page or model card but not in your list, it's an access issue."
+  - q: "What's the difference between `gpt-4o` and `gpt-4o-2024-08-06`?"
+    a: "`gpt-4o` is a moving alias that points to the current production snapshot. `gpt-4o-2024-08-06` is a fixed snapshot that won't change. Use the alias unless you need bit-exact reproducibility (compliance, evals); switch to a snapshot when you do, and watch the deprecation page so you can upgrade before it's retired."
+  - q: "Can I see when a model is going to be deprecated?"
+    a: "platform.openai.com/docs/deprecations lists every shutdown date with at least 6 months' notice. Subscribe to OpenAI's status page or developer newsletter to catch announcements. Pin to snapshots only if you have a process to migrate before the shutdown date."
+  - q: "Does `model_not_found` count toward rate limits or billing?"
+    a: "No. Failed requests don't consume tokens or count against rate limits. The 404 fails fast at the routing layer before the model is invoked."
+  - q: "Why can I use `gpt-4o` in the playground but not via API?"
+    a: "Almost always tier mismatch — the playground uses your org's session, which may have UI access while your API key is on a different tier or scope. Or you're calling from a project that hasn't been granted the model. Check the project settings under Settings → Projects."
+  - q: "How do I find a fine-tuned model's exact ID?"
+    a: "Dashboard → Fine-tuning → click the job → 'Output model' shows the full ID `ft:base-model:org-id:custom-suffix:hash`. Use that exact string as `model:` in your call. Fine-tunes are visible only within their owning project."
+  - q: "Are some models region-restricted?"
+    a: "OpenAI's API is mostly global, but some models (notably image and audio) have region rollouts. Enterprise contracts may also restrict by data residency. If `models.list()` returns the model but calls fail with `model_not_found`, contact your account manager."
+  - q: "Can I alias deprecated models to their replacements automatically?"
+    a: "Yes — wrap your client with a model-rewrite layer. Map `gpt-3.5-turbo-0301` → `gpt-3.5-turbo`, `gpt-4-vision-preview` → `gpt-4o`, etc. This buys you time to do a proper migration without immediate breakage."
+escalate: |
+  Open a support ticket only if (a) `models.list()` shows the model but calls return 404, indicating a routing bug on OpenAI's side, or (b) you've been promised access (enterprise contract, beta program) but don't see the model in your list 24+ hours after the activation email. For tier upgrades or generally-available models, support can't override the gates.
+languages:
+  - python
+  - javascript
+  - go
+  - ruby
+keywords:
+  - openai model_not_found
+  - openai 404 model
+  - openai model does not exist
+  - openai model access
+  - openai deprecated model
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`model_not_found` is OpenAI's catch-all 404 for any model identifier that doesn't resolve to something your API key can call. The error message is intentionally ambiguous — "does not exist or you do not have access" — because OpenAI doesn't want to confirm the existence of gated models to unauthorised callers. That ambiguity is the source of most debugging time spent on this error.
+
+The fastest path to clarity is `client.models.list()`. If the model is in the response, you have access — recheck spelling, casing, and which endpoint you're calling. If it isn't, check OpenAI's deprecation page (the model may have been retired) and your account's usage tier (the model may be gated). Combine those two checks and you'll resolve 90%+ of `model_not_found` errors in under a minute.

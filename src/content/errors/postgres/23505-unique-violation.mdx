@@ -1,0 +1,146 @@
+---
+service: postgres
+code: "23505"
+slug: 23505-unique-violation
+title: 'Postgres Error: 23505 — Duplicate Key Violates Unique Constraint (Cause + Fix)'
+plainTitle: Duplicate Key Violation
+category: database
+severity: medium
+tldrCause: Your INSERT or UPDATE produced a row whose unique-constrained column(s) already exist in the table. Postgres SQLSTATE 23505 — `unique_violation` — is raised when a UNIQUE or PRIMARY KEY index would otherwise contain duplicate values.
+tldrFix: Use `INSERT ... ON CONFLICT (col) DO UPDATE` (or `DO NOTHING`) for idempotent upserts, ensure your application is generating unique IDs (UUID v4 / serial), and handle the race between SELECT-then-INSERT with a single atomic statement.
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    ERROR:  duplicate key value violates unique constraint "users_email_key"
+    DETAIL:  Key (email)=(alice@example.com) already exists.
+    SQLSTATE: 23505
+  caption: "Postgres always tells you the constraint name and the offending key — read DETAIL, not just the message."
+causes:
+  - title: SELECT-then-INSERT race condition
+    body: "Two requests check `SELECT id FROM users WHERE email = $1`, both see no row, both run INSERT. One wins; the other gets 23505. The fix is to use a single atomic `INSERT ... ON CONFLICT` and let the database arbitrate."
+  - title: Re-running a non-idempotent migration or import
+    body: "Re-running a seed script, replaying an event stream, or rerunning a migration after a partial failure all attempt to insert rows that already exist. Without idempotency built in, every retry surfaces 23505."
+  - title: Wrong column generated client-side
+    body: "Generating IDs in application code (`Date.now()`, short hashes, sequence drift across replicas) eventually collides. Use UUID v4 for distributed generation, or let Postgres own the sequence with `BIGSERIAL`/`IDENTITY`."
+  - title: Composite unique constraint on a column subset
+    body: "A `UNIQUE (tenant_id, slug)` constraint is satisfied by any one of those columns being different. If your app forgets to scope by tenant when checking, the duplicate-detection logic misses cross-tenant slug collisions and 23505 fires from the database."
+  - title: Concurrent UPSERTs on the same key
+    body: "Even with ON CONFLICT, two concurrent inserters of the same key serialise — one gets the conflict and runs the DO UPDATE branch. If you wrote `ON CONFLICT DO NOTHING` but expected the row to be present afterwards, you may misread the empty RETURNING and treat success as failure."
+fixes:
+  - title: Use ON CONFLICT for idempotent upserts
+    likelihood: high
+    body: |
+      `INSERT ... ON CONFLICT (col) DO UPDATE SET ...` is the canonical Postgres upsert. It atomically inserts or updates without a SELECT round-trip and is race-safe.
+    code:
+      language: sql
+      filename: upsert.sql
+      code: |
+        INSERT INTO users (email, name, last_login)
+        VALUES ($1, $2, now())
+        ON CONFLICT (email)
+        DO UPDATE SET
+          name = EXCLUDED.name,
+          last_login = now()
+        RETURNING id, email;
+  - title: For "create only if new" use ON CONFLICT DO NOTHING + RETURNING
+    likelihood: high
+    body: |
+      To create a row only when missing, use DO NOTHING. RETURNING will be empty on conflict — query separately for the existing row's id.
+    code:
+      language: javascript
+      filename: getOrCreate.js
+      code: |
+        import { Pool } from 'pg';
+        const pool = new Pool();
+
+        async function getOrCreateUser(email, name) {
+          const { rows: inserted } = await pool.query(
+            `INSERT INTO users (email, name) VALUES ($1, $2)
+             ON CONFLICT (email) DO NOTHING
+             RETURNING id`,
+            [email, name],
+          );
+          if (inserted.length) return inserted[0].id;
+          const { rows: existing } = await pool.query(
+            'SELECT id FROM users WHERE email = $1',
+            [email],
+          );
+          return existing[0].id;
+        }
+  - title: Catch 23505 in application code as a domain signal
+    likelihood: medium
+    body: |
+      For workflows where duplicates are expected (idempotent webhooks, retried API calls), treat SQLSTATE 23505 as a successful outcome rather than an error. The pg driver exposes it on the error code field.
+    code:
+      language: javascript
+      filename: idempotent_webhook.js
+      code: |
+        try {
+          await pool.query(
+            'INSERT INTO webhook_events (event_id, payload) VALUES ($1, $2)',
+            [event.id, event.payload],
+          );
+        } catch (err) {
+          if (err.code === '23505') {
+            // Duplicate event delivery — already processed.
+            return;
+          }
+          throw err;
+        }
+  - title: Switch ID generation to UUID v4 or DB-side sequences
+    likelihood: medium
+    body: |
+      Client-side timestamps and short hashes will eventually collide under load. UUID v4 (16 bytes random) has astronomically low collision probability. Postgres `BIGSERIAL` or `GENERATED BY DEFAULT AS IDENTITY` keep generation server-side and monotonic.
+  - title: Add a partial unique index for soft-delete tables
+    likelihood: low
+    body: |
+      Tables with soft-delete (`deleted_at IS NOT NULL`) shouldn't enforce uniqueness on tombstoned rows. Use a partial unique index: `CREATE UNIQUE INDEX users_email_active_idx ON users (email) WHERE deleted_at IS NULL;`
+detection: |
+  Track 23505 separately from generic SQL errors — most are expected (idempotent retries) and should not page. Alarm only when 23505 fires on a constraint that's *meant* to be exclusive (e.g., `payments_idempotency_key_key`) and the upstream caller is supposed to be passing a unique key. Tag by constraint name in your error tracker.
+related:
+  - econnrefused-postgres
+  - 53300-too-many-connections-postgres
+  - 40p01-deadlock-detected-postgres
+  - foreign-key-violation-postgres
+  - serialization-failure-postgres
+relatedGuide: postgres-error-codes
+faq:
+  - q: 'What''s the difference between 23505 and 23503?'
+    a: '23505 is `unique_violation` — duplicate key on a unique index. 23503 is `foreign_key_violation` — referencing a row that doesn''t exist (or deleting a row that''s still referenced). Both are integrity-constraint errors but the fix is different: 23505 is "this key already exists," 23503 is "the key you''re pointing at doesn''t."'
+  - q: 'Does ON CONFLICT acquire a lock on the entire table?'
+    a: 'No. ON CONFLICT takes a row-level lock on the conflicting row only (or the index entry being inserted). Concurrent inserts of *different* keys don''t block each other. The serialisation cost is paid only by inserts targeting the same key — exactly what you want.'
+  - q: Can 23505 fire from an UPDATE, not just INSERT?
+    a: 'Yes. Updating a row''s value to one that collides with another row''s unique-indexed value triggers 23505. Common case: changing a user''s email to one already in use by a different user.'
+  - q: How do I find which constraint was violated when there are several?
+    a: 'The error message includes the constraint name (e.g., `users_email_key`) and the DETAIL line shows the column and value (e.g., `Key (email)=(alice@example.com)`). The pg driver exposes both as `err.constraint` and `err.detail`.'
+  - q: 'Should I use ON CONFLICT DO UPDATE or DO NOTHING?'
+    a: 'DO UPDATE for "save the latest version" semantics (refreshing a cached aggregate, last-write-wins user profiles). DO NOTHING for "first-write-wins" semantics (immutable events, idempotent receipts). Pick based on whether the second writer has new information worth keeping.'
+  - q: 'Why does ON CONFLICT need an index, not just a column?'
+    a: 'The conflict target must match an existing UNIQUE or PRIMARY KEY index — Postgres uses that index to detect the conflict atomically without a table scan. If your conflict target column has no unique index, ON CONFLICT raises a different error at parse time. Add the index first.'
+  - q: 'Can 23505 happen on a deferred constraint?'
+    a: 'Yes — at COMMIT time. Deferred unique constraints don''t fire on the violating INSERT; they fire when the transaction commits. The error still has SQLSTATE 23505 but appears at COMMIT, which can confuse logging that assumes errors fire at the SQL statement boundary.'
+  - q: 'Is 23505 a sign of a bug or a normal race?'
+    a: 'Either. In webhook ingestion or distributed jobs, 23505 from a unique idempotency key is *expected* and signals correct deduplication. In user-facing flows (signup, slug creation), 23505 means your client-side check raced against another writer — handle the conflict explicitly with a clear UI message.'
+escalate: |
+  No vendor escalation needed for 23505 — it's a deterministic constraint violation, not a Postgres bug. If you see 23505 fire on inserts where the key shouldn't be possible (e.g., fresh UUIDs), check for replica lag (you may be inserting against a stale replica) or check for sequence advancement after a `pg_dump` restore (sequences don't reset automatically).
+languages:
+  - javascript
+  - python
+  - go
+  - ruby
+  - java
+keywords:
+  - postgres 23505
+  - postgres unique_violation
+  - postgres duplicate key
+  - on conflict postgres
+  - postgres upsert
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+SQLSTATE `23505` is Postgres's way of saying "I refused to insert this row because doing so would violate a unique constraint." It's the most common integrity error in production Postgres and almost always falls into one of three categories: a race between SELECT and INSERT, a non-idempotent retry, or client-generated IDs colliding under load.
+
+The fix is rarely "lock harder" — it's "express the operation atomically." `INSERT ... ON CONFLICT` lets Postgres arbitrate concurrent writers without application-level coordination. For webhooks and event-driven flows, catching 23505 and treating it as success is the simplest possible deduplication strategy and works correctly even at high concurrency.

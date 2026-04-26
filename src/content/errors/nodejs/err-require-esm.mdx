@@ -1,0 +1,161 @@
+---
+service: nodejs
+code: ERR_REQUIRE_ESM
+slug: err-require-esm
+title: "Node.js Error: ERR_REQUIRE_ESM — CJS Can't Require an ES Module (Cause + Fix)"
+plainTitle: Cannot Require ESM Module
+category: config
+severity: high
+tldrCause: "Your CommonJS file used `require('some-package')` but the package is now ESM-only (its `package.json` has `\"type\": \"module\"` or `\"exports\"` only points to `.mjs`). Node's CJS loader can't synchronously load an ESM module."
+tldrFix: "Either convert your file to ESM (rename to `.mjs`, or set `\"type\": \"module\"` in your package.json) and use `import`, OR switch to a dynamic `await import('the-package')` inside an async function, OR pin the package to its last CJS-compatible major version."
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    Error [ERR_REQUIRE_ESM]: require() of ES Module
+    /app/node_modules/node-fetch/src/index.js from /app/server.js not supported.
+    Instead change the require of /app/node_modules/node-fetch/src/index.js in
+    /app/server.js to a dynamic import() which is available in all CommonJS modules.
+        at Object.<anonymous> (/app/server.js:1:14) {
+      code: 'ERR_REQUIRE_ESM'
+    }
+  caption: Node tells you the offending file (`/app/server.js`) and the ESM module it tried to require. Both are actionable.
+causes:
+  - title: Package went ESM-only in a major version bump
+    body: "node-fetch v3, chalk v5, got v12, nanoid v4, p-limit v4, file-type v17, and many others ship pure ESM. Your package.json upgraded across the breaking version (e.g., `^2.6.0` → `^3.0.0`) and your CommonJS code can no longer require them."
+  - title: Mixed CJS/ESM project without correct package.json
+    body: "Your project is CommonJS (no `\"type\"` field, defaults to CJS) but you installed an ESM-only dep. Or you set `\"type\": \"module\"` but your tooling (ts-node, jest, eslint configs) still loads code as CJS."
+  - title: TypeScript transpiles import to require
+    body: "`import fetch from 'node-fetch'` looks like ESM in your `.ts` source, but if `tsconfig.json` has `\"module\": \"commonjs\"` (the default for older targets), tsc emits `require('node-fetch')` — which then hits ERR_REQUIRE_ESM at runtime."
+  - title: Bundler bundles for CJS but a dependency is ESM-only
+    body: "Webpack, esbuild, or tsc emits CJS output. The bundle then `require()`s a transitive ESM-only dep at runtime. The bundler can't statically resolve ESM-from-CJS without dual-package handling."
+  - title: ts-node, jest, or eslint config running in CJS mode
+    body: "Default ts-node uses CJS. Jest's transform emits CJS. ESLint's flat config loader is CJS. All of these hit ERR_REQUIRE_ESM the moment you reference an ESM-only package from configs they load."
+fixes:
+  - title: Convert your project to ESM
+    likelihood: high
+    body: |
+      Cleanest long-term fix. Add `"type": "module"` to package.json, rename `.js` to `.mjs` (or keep `.js` if `type: module` is set), and replace `require()` with `import`. Watch for `__dirname`/`__filename`/`require.resolve` — they don't exist in ESM and need shims.
+    code:
+      language: javascript
+      filename: server.mjs
+      code: |
+        // Was: const fetch = require('node-fetch');
+        import fetch from 'node-fetch';
+
+        // ESM doesn't have __dirname / __filename — use:
+        import { fileURLToPath } from 'node:url';
+        import { dirname } from 'node:path';
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = dirname(__filename);
+
+        const res = await fetch('https://example.com');
+        console.log(await res.text());
+  - title: Use dynamic import() inside async functions
+    likelihood: high
+    body: |
+      Dynamic `import()` is available in CommonJS. It's async, so wrap usage in an async function or top-level await (Node 14.8+ in ESM, or experimental in CJS). This works without changing your project's module type.
+    code:
+      language: javascript
+      filename: server.js
+      code: |
+        // CommonJS file, but uses ESM-only node-fetch via dynamic import.
+        async function main() {
+          const { default: fetch } = await import('node-fetch');
+          const res = await fetch('https://example.com');
+          console.log(await res.text());
+        }
+
+        main().catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+  - title: Pin the package to its last CJS-compatible version
+    likelihood: medium
+    body: |
+      For projects you don't want to migrate yet, pin the package to its last CJS major. node-fetch 2.x, chalk 4.x, got 11.x, nanoid 3.x all keep CJS support. Document why in a code comment so future maintainers don't auto-upgrade.
+    code:
+      language: json
+      filename: package.json
+      code: |
+        {
+          "dependencies": {
+            "node-fetch": "^2.7.0",
+            "chalk": "^4.1.2",
+            "got": "^11.8.6",
+            "nanoid": "^3.3.7"
+          }
+        }
+  - title: Configure TypeScript / ts-node for ESM output
+    likelihood: medium
+    body: |
+      In tsconfig.json: set `"module": "NodeNext"` (or `"esnext"` with `"moduleResolution": "NodeNext"`) and add `"type": "module"` to your package.json. ts-node needs the ESM loader: `node --loader ts-node/esm`.
+    code:
+      language: json
+      filename: tsconfig.json
+      code: |
+        {
+          "compilerOptions": {
+            "target": "ES2022",
+            "module": "NodeNext",
+            "moduleResolution": "NodeNext",
+            "esModuleInterop": true,
+            "strict": true
+          }
+        }
+  - title: Use createRequire to load the ESM module's CJS twin (when it exists)
+    likelihood: low
+    body: |
+      Some packages ship dual builds — ESM main, CJS shim under a subpath. `createRequire` can reach those. This is a workaround, not a fix; prefer the ESM migration.
+    code:
+      language: javascript
+      filename: shim.js
+      code: |
+        const { createRequire } = require('node:module');
+        const requireCjs = createRequire(import.meta.url);
+        const cjsTwin = requireCjs('some-pkg/cjs');
+detection: |
+  ERR_REQUIRE_ESM is a startup error — it crashes your process before any traffic flows. CI catches it if you run the full app on every PR. For dependency upgrades, use `npm outdated` and read the changelog of every major bump; ESM-only is almost always called out. Renovate/Dependabot can be configured to pin majors and require manual review for the ones that go ESM.
+related:
+  - econnrefused-nodejs
+  - eaddrinuse-nodejs
+  - heap-out-of-memory-nodejs
+  - module-not-found-nextjs
+  - module-not-found-error-python
+relatedGuide: nodejs-esm-migration
+faq:
+  - q: Why did my code suddenly start throwing ERR_REQUIRE_ESM after npm install?
+    a: "A dependency you have shipped a major version that's ESM-only — most commonly `node-fetch`, `chalk`, `got`, `p-queue`, or `nanoid`. Run `npm ls <pkg>` to see what version got installed and check its changelog. If you didn't intend to upgrade, restore the old major in package.json and run `npm install` again."
+  - q: "Can I keep CommonJS and still use ESM-only packages?"
+    a: "Yes — use dynamic `import()` inside async functions. CommonJS supports `await import('esm-only')`; you just can't use the synchronous `require()`. The downside is the rest of your code has to handle the async load (no top-level imports for that package). For one or two ESM packages, it's pragmatic; for many, migrate to ESM."
+  - q: How do I know if a package is ESM-only?
+    a: "Open `node_modules/<pkg>/package.json` and look at three fields: `\"type\": \"module\"` (ESM by default), `\"main\"` (extension `.mjs` or no `\"main\"`/`\"exports\"` for CJS), and `\"exports\"` (if it only declares `\"import\"` and no `\"require\"` for the entry, it's ESM-only). Most packages document the move in their README."
+  - q: My TypeScript code uses `import` but I still get ERR_REQUIRE_ESM. Why?
+    a: "Because tsc transpiles `import` to `require` when `tsconfig.json` has `\"module\": \"commonjs\"`. Your source looks like ESM but the compiled output is CJS. Switch tsconfig `module` to `NodeNext` (and add `\"type\": \"module\"` to package.json) so tsc emits real ESM."
+  - q: Does Node 20 / 22 fix ERR_REQUIRE_ESM?
+    a: "Node 22+ has an experimental `require(esm)` flag (`--experimental-require-module`) that lets CJS synchronously require some ESM modules. It's still gated and has restrictions (no top-level await, no live bindings). Don't depend on it in production yet. The boring, reliable path is ESM migration or dynamic import."
+  - q: Will switching to ESM break my Jest tests?
+    a: "It can — Jest's default transform emits CJS. Either configure Jest to use `babel-jest` with the right preset, switch to Vitest (native ESM), or run Jest with the experimental ESM flag (`NODE_OPTIONS=--experimental-vm-modules`). Most teams switch to Vitest for ESM projects."
+  - q: I see `Cannot use import statement outside a module` instead of ERR_REQUIRE_ESM. Are they the same?
+    a: "Related but different. `Cannot use import statement outside a module` is Node refusing to parse `import` syntax in a file it loaded as CJS — fix by setting `\"type\": \"module\"` or renaming to `.mjs`. ERR_REQUIRE_ESM is a runtime error from `require()` on an ESM file. The first is a parser error; the second is a loader error."
+  - q: Should I use top-level await once I migrate to ESM?
+    a: "It works in ESM modules in Node 14.8+ and is convenient — but be careful in libraries you publish. Top-level await delays the module's initialization, which can deadlock circular imports and complicates bundlers. In application code (entry points, route handlers), it's fine; in shared libraries, prefer wrapping in an async init function."
+escalate: |
+  ERR_REQUIRE_ESM is a configuration/dependency issue, not a Node bug. Don't file upstream. If a package's ESM-only release broke something subtle (wrong export shape, missing CJS twin in a dual-package claim), file with the package — most maintainers respond fast because the issue is repeated by every CJS user upgrading.
+languages:
+  - typescript
+  - javascript
+keywords:
+  - nodejs err_require_esm
+  - require esm module
+  - cannot require esm
+  - node-fetch v3 require error
+  - esm cjs interop
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`ERR_REQUIRE_ESM` shows up the moment a package you depend on goes ESM-only and your code is still CommonJS. The Node CJS loader is synchronous; ESM is asynchronous; the two can't be bridged via `require()`. Node throws rather than guess.
+
+Three fixes, in priority order: migrate your code to ESM (cleanest), use dynamic `import()` (least invasive), or pin the package to its last CJS-compatible major (buys time). Almost every Node project hits this at least once during the 2022-2026 ecosystem-wide ESM migration; the boring fixes are well-trodden.

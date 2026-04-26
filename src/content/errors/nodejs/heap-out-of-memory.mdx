@@ -1,0 +1,145 @@
+---
+service: nodejs
+code: heap_out_of_memory
+slug: heap-out-of-memory
+title: "Node.js Error: JavaScript heap out of memory — V8 Heap Exhausted (Cause + Fix)"
+plainTitle: JavaScript Heap Out of Memory
+category: runtime
+severity: critical
+tldrCause: V8's old-generation heap filled up and the garbage collector couldn't free enough space, so V8 aborts the process with a fatal allocation failure. Default heap is ~4GB on 64-bit; long-lived references (caches, listeners, closures, big arrays) prevent reclamation.
+tldrFix: "Find the leak with a heap snapshot (`node --inspect` + Chrome DevTools, or `--heapsnapshot-near-heap-limit`) — don't just bump `--max-old-space-size`. Free large data after use, drop event listeners, paginate streams, and avoid keeping the entire input in memory."
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    <--- Last few GCs --->
+    [12345:0x130008000]   65432 ms: Mark-sweep 4083.5 (4127.4) -> 4079.2 (4127.4) MB, 2087.4 / 0.0 ms  (+ 0.0 ms in 0 steps since start of marking, biggest step 0.0 ms, walltime since start of marking 2088 ms) (average mu = 0.106, current mu = 0.020) allocation failure; scavenge might not succeed
+    <--- JS stacktrace --->
+    FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory
+     1: 0x100b95c4c node::Abort() [/usr/local/bin/node]
+     2: 0x100b95dd8 node::OnFatalError(char const*, char const*) [/usr/local/bin/node]
+  caption: V8 logs the last few GC cycles before it gives up. The "(4083.5 → 4079.2)" tells you GC freed almost nothing — a leak.
+causes:
+  - title: Large data loaded fully into memory
+    body: "Reading a 2GB JSON file with `JSON.parse(fs.readFileSync(...))`, loading every row of a query into a single array, or buffering an entire HTTP response body. Stream the data instead — Node's stream APIs were built for exactly this."
+  - title: Event listener leak
+    body: "Adding listeners to an `EventEmitter` (or DOM-style emitter) without ever removing them. Node logs `MaxListenersExceededWarning: 11 listeners added` first; if you ignore the warning, you eventually run out of heap. Common around `process.on('uncaughtException')` in test suites."
+  - title: Cache without bounds
+    body: "An in-memory cache (`Map`, `WeakMap`, plain object) that grows unbounded over the process lifetime. Production: a `Map` keyed by user ID with no eviction, holding response data, growing forever. Replace with `lru-cache`."
+  - title: Closure holding more than it needs
+    body: "A function returned from another function captures the entire parent scope. If the parent had a 200MB buffer, the closure keeps it alive. Visible in heap snapshots as 'closure → context → buffer'."
+  - title: Worker spawn / require explosion
+    body: "Forking workers in a tight loop, or `require()`ing modules dynamically without limit. Each worker has its own heap; spawning 1000 workers exhausts memory at the OS level too. Monorepos that import every workspace at startup also hit this."
+fixes:
+  - title: Take a heap snapshot and find what's retaining memory
+    likelihood: high
+    body: |
+      Don't guess. `node --inspect` your process, attach Chrome DevTools (`chrome://inspect`), and take three heap snapshots: one cold, one mid-load, one after the leak should have cleared. Compare with the Comparison view; the largest "Delta" is your leak.
+    code:
+      language: bash
+      filename: debug-heap.sh
+      code: |
+        # Run with inspector + auto-snapshot on near-heap-limit:
+        node --inspect \
+             --heapsnapshot-near-heap-limit=3 \
+             --max-old-space-size=4096 \
+             server.js
+
+        # Or programmatic snapshot (good for long-running services):
+        # require('v8').writeHeapSnapshot('/tmp/heap.heapsnapshot');
+        # then load in Chrome DevTools → Memory tab.
+  - title: Stream large data, never buffer
+    likelihood: high
+    body: |
+      For files, queries, and HTTP bodies over a few MB, use streams. Node's `stream/promises` + `pipeline()` is the safe pattern — backpressure and error handling are correct by default.
+    code:
+      language: typescript
+      filename: stream-csv.ts
+      code: |
+        import { createReadStream, createWriteStream } from 'node:fs';
+        import { pipeline } from 'node:stream/promises';
+        import { parse } from 'csv-parse';
+        import { stringify } from 'csv-stringify';
+
+        // Process a 5GB CSV row-by-row with O(1) memory.
+        await pipeline(
+          createReadStream('huge.csv'),
+          parse({ columns: true }),
+          async function* (rows) {
+            for await (const row of rows) {
+              yield { ...row, processed: true };
+            }
+          },
+          stringify({ header: true }),
+          createWriteStream('out.csv'),
+        );
+  - title: Bound your caches
+    likelihood: high
+    body: |
+      Replace plain `Map`/object caches with `lru-cache`, which evicts by size, by count, or by TTL. Without bounds, a cache is a leak with extra steps.
+    code:
+      language: typescript
+      filename: cache.ts
+      code: |
+        import { LRUCache } from 'lru-cache';
+
+        export const userCache = new LRUCache<string, User>({
+          max: 10_000,                       // count
+          maxSize: 50 * 1024 * 1024,         // 50MB
+          sizeCalculation: (v) => JSON.stringify(v).length,
+          ttl: 5 * 60 * 1000,                // 5min
+          updateAgeOnGet: true,
+        });
+  - title: Remove event listeners when you're done with them
+    likelihood: medium
+    body: |
+      Always `.off()` (or `removeListener`) what you `.on()`. For `process.on('uncaughtException')` in tests, prefer `process.once()`. For long-lived emitters in handlers, use `AbortController` to clean up on request abort.
+  - title: Bump heap size as a temporary mitigation
+    likelihood: low
+    body: |
+      `--max-old-space-size=8192` (8GB) gives you headroom while you find the leak. Don't ship this as a fix — your container will OOM at the OS level next, which is worse (no JS error, just a SIGKILL). Use it to keep production alive while you investigate.
+detection: |
+  Track Node's `process.memoryUsage().heapUsed` and `heapTotal` as gauges in your APM. Healthy services have a sawtooth pattern (GC reclaims regularly); leaking services trend upward without dropping back. Alert on heapUsed > 80% of max_old_space_size for over 5 minutes. Use `--heapsnapshot-near-heap-limit=N` in production to capture N snapshots automatically before the crash — invaluable for post-mortems.
+related:
+  - econnrefused-nodejs
+  - eaddrinuse-nodejs
+  - err-require-esm-nodejs
+  - function-invocation-timeout-nextjs
+  - module-not-found-error-python
+relatedGuide: nodejs-memory-debugging
+faq:
+  - q: Will increasing `--max-old-space-size` actually fix the error?
+    a: "Only if your real working set is bigger than the default heap (about 1.5–4GB depending on Node version) and you genuinely need it. If your app has a leak, bumping the heap delays the crash by hours or days, not eliminates it. Run a heap snapshot to confirm whether you have a leak (heap grows monotonically) or a sizing issue (heap plateaus high but stable)."
+  - q: What's the default Node heap size?
+    a: "Roughly 4GB on 64-bit Node 18+, but it auto-scales based on physical RAM in newer versions. On Node 14 and earlier, it was ~1.7GB regardless of host RAM. Override with `--max-old-space-size=<MB>` or the env var `NODE_OPTIONS=--max-old-space-size=8192`. The new-generation heap (where short-lived objects live) is much smaller and tuned separately with `--max-semi-space-size`."
+  - q: How do I take a heap snapshot in production without a debugger?
+    a: "Two options: (1) `require('v8').writeHeapSnapshot('/tmp/heap.heapsnapshot')` from inside your code (e.g., on a SIGUSR2 handler), then load in Chrome DevTools → Memory. (2) Run with `--heapsnapshot-near-heap-limit=3` so Node auto-dumps three snapshots as it approaches the limit. Snapshots are big (often hundreds of MB) — save to a volume with space."
+  - q: Why does my service leak when running locally is fine?
+    a: "Two common reasons: (1) traffic patterns — production sees thousands of unique users; dev sees one. A cache keyed by user ID grows in production but never in dev. (2) long uptime — leaks accumulate over hours, and you restart your local server every few minutes. Run a soak test (sustained traffic for 30+ minutes) locally to reproduce."
+  - q: Does using TypeScript or async/await cause heap issues?
+    a: "No. The compiled output runs on the same V8 — TypeScript is just types. Async/await uses Promises, and unresolved Promises (held by closures, stored in arrays) are the actual leak source, not async itself. If you await everything correctly, async/await has no memory penalty."
+  - q: Are WeakMaps a fix for unbounded caches?
+    a: "Sometimes. WeakMaps don't prevent garbage collection of their keys, so if your key (object) becomes unreachable, the WeakMap entry goes away. They're great for metadata-keyed-by-object patterns. They are NOT a fix for caches keyed by string IDs — those need explicit eviction (lru-cache)."
+  - q: My Lambda / Vercel function gets out-of-memory. Same fix?
+    a: "Same diagnosis (find the retainer), different mitigation. Serverless platforms have hard memory limits — you can't `--max-old-space-size` past the function's allocated memory. Trim large allocations, avoid loading datasets into memory, and use streaming responses. On Lambda, allocate more memory (which also gives you proportionally more CPU)."
+  - q: How is heap out-of-memory different from container OOMKilled?
+    a: "Heap out-of-memory is V8 hitting its own configured ceiling — Node prints a JS stack and exits cleanly(ish). OOMKilled is the OS/container runtime killing the process because total RSS exceeded the cgroup limit. OOMKilled gives you no JS stack, just a SIGKILL. If `--max-old-space-size` is higher than your container's memory limit, you'll OOMKilled before V8 OOMs — set the JS heap to ~80% of the container memory."
+escalate: |
+  Heap out-of-memory is virtually always an application bug or config mismatch, not a V8 bug. Before filing upstream: confirm with a heap snapshot that the retainers are your code (or a library's code), not internal V8 structures. If a heap snapshot shows runaway growth in V8 internals (HeapSnapshot, native handles) with no userland references, that's an upstream issue worth filing with the package maintainer or the Node project.
+languages:
+  - typescript
+  - javascript
+keywords:
+  - nodejs heap out of memory
+  - javascript heap out of memory
+  - node max-old-space-size
+  - node memory leak
+  - v8 allocation failure
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`JavaScript heap out of memory` is V8 throwing in the towel. Garbage collection ran over and over, couldn't free enough space, and the engine aborts rather than leave you in a half-corrupted state. The error always means one of two things: either your real working set is bigger than the configured heap, or you have a leak.
+
+The default reflex — bump `--max-old-space-size` — only helps the first case. For the second, it just delays the crash. The reliable path is a heap snapshot: see what's retained, fix the retention, watch the sawtooth come back.

@@ -1,0 +1,175 @@
+---
+service: anthropic
+code: rate_limit_error
+slug: rate-limit-error
+title: "Anthropic Error: rate_limit_error — Too Many Requests (Cause + Fix)"
+plainTitle: Too Many Requests
+httpStatus: 429
+category: rate-limit
+severity: high
+tldrCause: "You exceeded one of Anthropic's per-minute caps for the model and tier — RPM (requests/min), ITPM (input tokens/min), or OTPM (output tokens/min). Anthropic enforces all three independently and you can hit any one without breaching the others."
+tldrFix: "Read the `retry-after` header (or fall back to exponential backoff with jitter), throttle client-side at ~80% of your tier limit, and migrate large workloads to the Message Batches API. Tier upgrades happen automatically with paid spend."
+contextCode:
+  language: python
+  filename: claude_call.py
+  code: |
+    import anthropic
+
+    client = anthropic.Anthropic()
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+    except anthropic.RateLimitError as e:
+        # e.status_code == 429
+        # e.body['error']['type'] == 'rate_limit_error'
+        # e.response.headers['retry-after'] = '12'  # seconds
+        # e.response.headers['anthropic-ratelimit-requests-remaining'] = '0'
+        retry_after = int(e.response.headers.get('retry-after', '5'))
+  caption: "Anthropic returns 429 with `type: rate_limit_error` and a `retry-after` header — honour it before retrying."
+causes:
+  - title: RPM (requests per minute) ceiling hit
+    body: "Each tier has a per-minute request cap. Tier 1 paid is typically ~50 RPM for Opus and 1000 RPM for Haiku. Bursts of concurrent calls — a worker pool spinning up, a batch job kicking off — can saturate RPM for the rest of the rolling minute."
+  - title: ITPM (input tokens per minute) ceiling hit
+    body: "Anthropic uniquely bills *input* tokens per minute as a separate dimension. Long contexts (100k+ token Claude calls) blow ITPM faster than RPM. Tier 1 Sonnet ITPM is typically ~40,000 — only 4 calls of 10k input tokens each per minute."
+  - title: OTPM (output tokens per minute) ceiling hit
+    body: "Output tokens are billed separately from input. Long generations (essays, code synthesis, structured outputs) can exhaust OTPM while ITPM is healthy. The error message tells you which limit you hit."
+  - title: Concurrent stream limit on real-time workloads
+    body: "Streaming responses hold a connection open for the full generation. Many concurrent streams can hit Anthropic's per-org concurrent-stream cap before any of the per-minute caps. The error is the same `rate_limit_error`."
+  - title: Cache write/read rate against prompt cache limits
+    body: "Prompt caching has its own per-minute write caps. Heavy cache-write workloads (lots of unique 100k-token contexts being primed) can trigger 429s with a cache-specific message. Inspect the error body — Anthropic distinguishes cache writes from regular calls."
+fixes:
+  - title: Honour `retry-after` and the `anthropic-ratelimit-*` headers
+    likelihood: high
+    body: |
+      Anthropic returns these headers on every response (success and 429):
+      `anthropic-ratelimit-requests-remaining`, `anthropic-ratelimit-input-tokens-remaining`, `anthropic-ratelimit-output-tokens-remaining`, plus matching `-reset` timestamps and an explicit `retry-after` on 429s. Use them — don't guess.
+    code:
+      language: python
+      filename: respect_headers.py
+      code: |
+        import time, random
+        import anthropic
+
+        client = anthropic.Anthropic()
+
+        def call_with_retry(messages, model="claude-sonnet-4-5", max_attempts=5):
+            for attempt in range(max_attempts):
+                try:
+                    return client.messages.create(
+                        model=model, max_tokens=1024, messages=messages,
+                    )
+                except anthropic.RateLimitError as e:
+                    if attempt == max_attempts - 1:
+                        raise
+                    retry_after = int(e.response.headers.get('retry-after', 0))
+                    backoff = max(retry_after, 2 ** attempt)
+                    time.sleep(backoff + random.uniform(0, backoff * 0.25))
+  - title: Add a client-side rate limiter at 80% of your cap
+    likelihood: high
+    body: |
+      Pre-empt 429s by self-throttling. Use a token bucket sized at ~80% of your tier's RPM/ITPM/OTPM caps. Convert bursts into queues, which gives much better latency p99 than retrying after a 429.
+    code:
+      language: python
+      filename: bucket.py
+      code: |
+        from time import monotonic
+        from threading import Lock
+
+        class TokenBucket:
+            def __init__(self, rate_per_min, capacity):
+                self.rate = rate_per_min / 60.0
+                self.capacity = capacity
+                self.tokens = capacity
+                self.last = monotonic()
+                self.lock = Lock()
+
+            def take(self, n=1):
+                with self.lock:
+                    now = monotonic()
+                    self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+                    self.last = now
+                    if self.tokens >= n:
+                        self.tokens -= n
+                        return True
+                    return False
+
+        # Tier-1 Sonnet: 50 RPM → throttle at 40 RPM
+        bucket = TokenBucket(rate_per_min=40, capacity=10)
+  - title: Move large workloads to the Message Batches API
+    likelihood: high
+    body: |
+      Batches process up to 100k requests asynchronously over 24 hours, are 50% cheaper, and have a separate, much higher rate limit. For embeddings-like workloads, evals, bulk transcription cleanup, or any non-realtime task, batches are the right shape — not the synchronous Messages API."
+  - title: Use prompt caching to cut token cost and ITPM pressure
+    likelihood: medium
+    body: |
+      Prompt caching reduces ITPM consumption by 90%+ on repeated long prefixes. Set `cache_control: { type: 'ephemeral' }` on stable system prompts, RAG corpora, or tool definitions. The cached prefix doesn't recount against ITPM on subsequent reads (only a small read-billing). For long-context bots, this is the single biggest ITPM relief."
+    code:
+      language: python
+      filename: caching.py
+      code: |
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1024,
+            system=[
+                {"type": "text",
+                 "text": LONG_INSTRUCTIONS,
+                 "cache_control": {"type": "ephemeral"}},
+            ],
+            messages=[{"role": "user", "content": "..."}],
+        )
+  - title: Request a tier upgrade or move to Priority Tier
+    likelihood: medium
+    body: |
+      Tier upgrades happen automatically as you spend more. For predictable production load, Priority Tier (via Bedrock or Vertex with a commitment) gives reserved capacity that shields you from contention 429s. Anthropic doesn't grant manual rate-limit exceptions on the standard tier ladder."
+detection: |
+  Log all `anthropic-ratelimit-*` headers from every response, not just 429s. Plot remaining requests/input-tokens/output-tokens over time to see how close you're running to the cap. Alert when any dimension drops below 20% of cap for >5 minutes — you're about to hit 429s. Tag 429 errors with which limit they hit (RPM vs ITPM vs OTPM) since each needs a different fix.
+related:
+  - overloaded-error
+  - authentication-error
+  - rate-limit-exceeded
+  - context-length-exceeded
+  - insufficient-quota
+relatedHttp: 429
+relatedGuide: handling-rate-limits
+faq:
+  - q: "What's the difference between `rate_limit_error` and `overloaded_error`?"
+    a: "`rate_limit_error` (429) is *your* org exceeding its per-minute caps — fix it by throttling or upgrading tier. `overloaded_error` (529) is Anthropic's *fleet* being at capacity — fix it by retrying or falling back. Different headers, different mitigations, different alarms."
+  - q: "Why does Anthropic separate input and output tokens for rate limiting?"
+    a: "Input and output have very different cost and capacity profiles. A 200k-token input + 500-token output stresses ITPM and KV cache memory; a 4k-input + 8k-output stresses OTPM and generation throughput. Separating them lets Anthropic keep both dimensions healthy and lets you hit the right metric to scale."
+  - q: "How do I know my current tier and limits?"
+    a: "Visit console.anthropic.com → Settings → Limits. It shows RPM, ITPM, OTPM per model for your tier. Tier upgrades happen automatically based on cumulative paid spend (typically thresholds at $5, $50, $500, $5k+) and a short cooling period."
+  - q: "Do failed requests count toward my limits?"
+    a: "Requests that hit 429 do *not* count toward token usage. Requests that succeed but disconnect mid-stream do consume the tokens generated up to the disconnect. Always tear down streaming connections cleanly to avoid wasted tokens."
+  - q: "Is the `retry-after` header always set on 429?"
+    a: "Yes — Anthropic always returns `retry-after` (in seconds) on `rate_limit_error`. Trust it as the floor for your next attempt. If missing (rare client-side parsing issue), default to exponential backoff starting at 1-2 seconds."
+  - q: "Should I share rate-limit pools across multiple API keys?"
+    a: "Limits are per *organisation*, not per key — all keys in your org share one pool. To isolate teams, use Workspaces (Anthropic's project equivalent), each with its own caps. Bedrock and Vertex have their own separate pools entirely."
+  - q: "Does prompt caching count against ITPM?"
+    a: "Cache reads consume only a small fraction of normal input tokens (typically 10% of the equivalent uncached cost). This means prompt caching effectively multiplies your ITPM headroom for stable long prefixes — the biggest single lever for ITPM-bound workloads."
+  - q: "Will Anthropic grant a one-off rate-limit exception?"
+    a: "On the standard tier ladder, no. Tier is determined by paid spend. For sustained production needs, move to Priority Tier via Bedrock or Vertex with a commitment, which gives reserved capacity. Direct Anthropic API enterprise contracts can negotiate custom caps."
+escalate: |
+  Open a support ticket only if (a) `anthropic-ratelimit-*` headers show plenty of headroom but you still get 429, indicating a routing or sync bug, (b) you've upgraded paid spend past a tier threshold but limits haven't refreshed after 7+ days, or (c) Priority Tier reservations are not honouring contracted RPM/ITPM. For 'I want a higher limit' on the standard tier, only paying more works.
+languages:
+  - python
+  - javascript
+  - go
+  - ruby
+keywords:
+  - anthropic rate_limit_error
+  - claude 429 too many requests
+  - anthropic ITPM limit
+  - anthropic OTPM limit
+  - claude rate limit
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`rate_limit_error` is Anthropic's HTTP 429 with the structured error type `rate_limit_error`. Unlike OpenAI, Anthropic enforces three independent per-minute dimensions — RPM, ITPM (input tokens per minute), and OTPM (output tokens per minute) — and you can saturate any one of them without coming close to the others. The error message and headers tell you which dimension hit the wall, which is the key to fixing it.
+
+The right cure depends on which dimension you're hitting. RPM-bound? Smooth your bursts with a token bucket and consider parallel batches. ITPM-bound? Add prompt caching on stable prefixes — it's a 10x reduction on cached reads. OTPM-bound? Cap `max_tokens` more aggressively and stream summaries instead of full essays. And for any sustained production workload, the Message Batches API is a separate, larger capacity pool that absorbs throughput at half the cost.

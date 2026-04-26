@@ -1,0 +1,161 @@
+---
+service: openai
+code: context_length_exceeded
+slug: context-length-exceeded
+title: "OpenAI Error: context_length_exceeded — Maximum Context Length Exceeded (Cause + Fix)"
+plainTitle: Maximum Context Length Exceeded
+httpStatus: 400
+category: validation
+severity: high
+tldrCause: "The total tokens (prompt + max_tokens for completion) exceeds the model's context window. For example, sending 130,000 input tokens to `gpt-4o` (128k window) or asking for 5,000 completion tokens when the prompt is already 125k."
+tldrFix: "Count tokens with `tiktoken` before sending. If over budget, either summarise/truncate the prompt, switch to a model with a larger window (`gpt-4.1` 1M, `gpt-4o` 128k), reduce `max_tokens`, or chunk the work into multiple calls."
+contextCode:
+  language: python
+  filename: long_prompt.py
+  code: |
+    import openai
+
+    long_text = open("legal-contract.txt").read()  # ~140k tokens
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": long_text}],
+            max_tokens=2000,
+        )
+    except openai.BadRequestError as e:
+        # e.status_code == 400
+        # e.code == 'context_length_exceeded'
+        # e.message: "This model's maximum context length is 128000 tokens.
+        #             However, your messages resulted in 142537 tokens.
+        #             Please reduce the length of the messages."
+        ...
+  caption: "OpenAI returns the actual prompt length and the model's limit in the message — parse those to drive automatic truncation."
+causes:
+  - title: Prompt alone exceeds the model's window
+    body: "The most direct cause — you tried to send more input tokens than the model can hold. `gpt-4o` is 128k tokens (~96k English words). Even a long PDF, a transcript of a 30-min call, or a few thousand lines of code can push past that."
+  - title: Prompt + max_tokens combined exceeds the window
+    body: "OpenAI counts both directions. If your prompt is 120k tokens on a 128k model and you ask for `max_tokens: 10000`, the request fails before generation starts. The total of input + max_tokens must fit, leaving you only 8k for output in this example."
+  - title: Long conversation history accumulating
+    body: "Multi-turn chat apps that append every message to `messages[]` blow past the limit silently. By turn 30 of a deep conversation, you're routinely sending 50k-100k tokens of history just to ask a one-line follow-up."
+  - title: Wrong tokeniser assumed (character vs token mismatch)
+    body: "Developers often estimate at 4 characters per token. That's a rough average — code, JSON, URLs, and non-English languages tokenise denser, sometimes 1-2 chars per token. A `len(text) / 4` estimate is wildly optimistic for code-heavy prompts."
+  - title: Embedded images counted as tokens
+    body: "Vision inputs add tokens based on resolution and detail level. A high-detail 2048x2048 image adds ~1,105 tokens. Send 10 images plus a long prompt and you'll easily clear 128k without realising."
+fixes:
+  - title: Count tokens with tiktoken before sending
+    likelihood: high
+    body: |
+      Always pre-flight count input + reserved output. If over budget, either truncate, switch model, or chunk. Pre-flight saves a round-trip and lets you fall back gracefully.
+    code:
+      language: python
+      filename: count.py
+      code: |
+        import tiktoken
+
+        def count_messages_tokens(messages, model="gpt-4o"):
+            enc = tiktoken.encoding_for_model(model)
+            tokens = 0
+            for m in messages:
+                tokens += 4  # per-message overhead
+                tokens += len(enc.encode(m["content"]))
+                tokens += len(enc.encode(m["role"]))
+            return tokens + 2  # priming
+
+        MODEL_LIMITS = {"gpt-4o": 128_000, "gpt-4.1": 1_047_576, "gpt-3.5-turbo": 16_385}
+
+        def fits(messages, model, max_tokens=1000):
+            return count_messages_tokens(messages, model) + max_tokens <= MODEL_LIMITS[model]
+  - title: Switch to a larger-context model
+    likelihood: high
+    body: |
+      `gpt-4.1` (1,047,576 tokens) and `gpt-4.1-mini` are the long-context options. `o1` and `o1-mini` are 200k. Move to a bigger model for the long-prompt path; you can keep `gpt-4o-mini` for short prompts to save money. Route by token count.
+    code:
+      language: python
+      filename: route.py
+      code: |
+        def route_by_length(messages):
+            tokens = count_messages_tokens(messages)
+            if tokens < 100_000:
+                return "gpt-4o"
+            if tokens < 200_000:
+                return "o1"
+            return "gpt-4.1"  # 1M context fallback
+  - title: Trim conversation history with a sliding window or summarisation
+    likelihood: high
+    body: |
+      For chat apps, keep the system prompt + last N user/assistant pairs + a running summary of older turns. Summarise in a separate cheap call (`gpt-4o-mini`) every K turns. Don't naively trim from the front — that drops context the model needs.
+    code:
+      language: python
+      filename: rolling_summary.py
+      code: |
+        SUMMARY_EVERY_N_TURNS = 10
+        KEEP_RECENT_PAIRS = 6
+
+        def compress(history, model="gpt-4o-mini"):
+            if len(history) <= KEEP_RECENT_PAIRS * 2:
+                return history
+            old = history[:-KEEP_RECENT_PAIRS * 2]
+            recent = history[-KEEP_RECENT_PAIRS * 2:]
+            summary = openai.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": "Summarise this conversation in <300 words, preserving facts and decisions."},
+                          *old],
+                max_tokens=400,
+            ).choices[0].message.content
+            return [{"role": "system", "content": f"Summary so far:\n{summary}"}, *recent]
+  - title: Chunk long documents and stitch results
+    likelihood: medium
+    body: |
+      For document analysis (legal, RAG, code review), split by semantic units (paragraphs, sections, functions) at a safe chunk size (~30k tokens), call the model per chunk, then stitch outputs in a final synthesis call. Map-reduce is more reliable than relying on a 1M context window for very long inputs.
+  - title: Reduce max_tokens to free up budget
+    likelihood: low
+    body: |
+      If you're close to the boundary, lower `max_tokens` from a default like 4096 to what the response actually needs. Most conversational answers fit in 500-800 tokens. This buys headroom on the input side without changing the prompt.
+detection: |
+  Log token counts on every successful response (`response.usage.prompt_tokens` and `completion_tokens`). Plot the p99 of `prompt_tokens` per endpoint over time — a creeping rise means conversation history isn't being trimmed and you'll hit `context_length_exceeded` soon. Add a pre-send guard that logs (and optionally rejects) any request over 90% of the model's limit.
+related:
+  - rate-limit-exceeded
+  - insufficient-quota
+  - model-not-found
+  - rate-limit-error
+  - overloaded-error
+relatedHttp: 400
+relatedGuide: managing-context-windows
+faq:
+  - q: "What's the actual context window for each OpenAI model?"
+    a: "As of 2025: `gpt-4.1` 1,047,576 tokens; `o1` and `o1-mini` 200,000; `gpt-4o` and `gpt-4o-mini` 128,000; `gpt-4-turbo` 128,000; `gpt-3.5-turbo` 16,385. The output limit is separate and smaller (typically 4k-16k). Always check the model card for current numbers — limits change."
+  - q: "Does the system prompt count toward the context window?"
+    a: "Yes. System, user, assistant, and tool messages all count, plus per-message overhead tokens (~4 per message) and a small priming amount. There's no 'free' system prompt budget."
+  - q: "How accurate is `len(text) / 4` for token counting?"
+    a: "Crude. English prose averages ~4 chars per token, but code is 2-3, URLs and JSON are 1-2, and CJK languages can be 1-1.5. Use `tiktoken` (Python) or `gpt-tokenizer` (JS) for an exact count. The error is predictable, not random — over-estimate by 20% for safety if you can't run a tokeniser."
+  - q: "If my prompt fits but my output is too long, do I get `context_length_exceeded`?"
+    a: "If `prompt_tokens + max_tokens > model_limit`, you get the error before generation starts. If the prompt fits and `max_tokens` fits but the model wants to write more, generation simply stops at `max_tokens` — no error, but `finish_reason` will be `'length'`. Bump `max_tokens` (within budget) to avoid truncation."
+  - q: "Can I send multiple separate calls instead of one giant call?"
+    a: "Yes — that's the chunk-and-stitch pattern. For RAG, retrieve the top-K most relevant chunks (3-10) instead of stuffing everything in. For document QA, map-reduce: process chunks separately, then synthesise."
+  - q: "Why does my chat hit `context_length_exceeded` after only a few turns?"
+    a: "You're probably re-sending the full file or system data every turn instead of just incremental messages. Or you've embedded images that add 1k+ tokens each. Print the running `count_messages_tokens()` on every turn to see where the bloat is."
+  - q: "Does streaming reduce the token cost or window usage?"
+    a: "No. Streaming changes only the delivery mode — the prompt still counts against the input window and you still pay for every output token streamed. Streaming saves you wall-clock time, not tokens."
+  - q: "Can I tell OpenAI to truncate the prompt for me?"
+    a: "No automatic truncation. You must trim before sending. The `truncation_strategy` parameter on the Assistants API does some auto-trimming, but for the standard Chat Completions API, the responsibility is fully client-side."
+escalate: |
+  This is almost never an OpenAI-side issue — escalation rarely helps. The exception: if you're certain your prompt fits within the documented model limit but the API still rejects with the wrong reported token count, log a support ticket with the request ID. Mismatch between SDK token counts and server-side counts has happened during model releases (e.g., new tokeniser shipped before docs updated).
+languages:
+  - python
+  - javascript
+  - go
+  - ruby
+keywords:
+  - openai context_length_exceeded
+  - openai context window error
+  - openai 400 context too long
+  - tiktoken count tokens
+  - openai prompt too long
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`context_length_exceeded` is OpenAI's hard ceiling on how much text you can fit into a single API call. The model has a fixed context window — 128k tokens for `gpt-4o`, 1M for `gpt-4.1`, 200k for `o1` — and your prompt plus the requested `max_tokens` for completion must fit inside that envelope. Cross it by even one token and the request is rejected with HTTP 400 before any generation starts.
+
+The error message is unusually helpful: it tells you the exact model limit and the exact token count it computed for your messages. Use those numbers — log them, alert on them, drive auto-truncation from them. The cure for `context_length_exceeded` is almost always pre-flight token counting plus one of three strategies: switch to a bigger-window model, summarise older context, or chunk the work into multiple calls.

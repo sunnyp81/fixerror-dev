@@ -1,0 +1,162 @@
+---
+service: github
+code: "403_rate_limit"
+slug: 403-rate-limit
+title: 'GitHub Error: 403 Rate Limit Exceeded — REST API Throttled (Cause + Fix)'
+plainTitle: REST API Rate Limit Exceeded
+httpStatus: 403
+category: rate-limit
+severity: high
+tldrCause: "You exceeded GitHub's primary REST API rate limit — 60 requests/hour for unauthenticated calls, 5,000/hour for personal access tokens, or 15,000/hour for GitHub App installations. The response is HTTP 403 with `X-RateLimit-Remaining: 0`."
+tldrFix: "Authenticate every request (`Authorization: Bearer <token>`), read the `X-RateLimit-Reset` header to know when the window opens, switch heavy reads to GraphQL or GitHub Apps for higher quotas, and use conditional requests with `If-None-Match` to avoid spending quota on unchanged data."
+contextCode:
+  language: text
+  filename: response.txt
+  code: |
+    HTTP/1.1 403 Forbidden
+    X-RateLimit-Limit: 60
+    X-RateLimit-Remaining: 0
+    X-RateLimit-Reset: 1714150800
+    X-RateLimit-Resource: core
+
+    {
+      "message": "API rate limit exceeded for 203.0.113.42. (But here's the good news: Authenticated requests get a higher rate limit.)",
+      "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"
+    }
+  caption: "Unauthenticated requests share a 60/hour bucket per IPv4 — easy to exhaust from CI runners on shared NAT."
+causes:
+  - title: Unauthenticated requests on a CI runner
+    body: "GitHub's unauthenticated quota is 60/hour per source IP. CI runners (especially shared GitHub Actions runners on shared NAT) consume this collectively. A single noisy job can lock out everyone else on the same exit IP for 59 minutes."
+  - title: PAT used for what should be a GitHub App
+    body: "Personal access tokens get 5,000/hour. GitHub Apps get 15,000/hour per installation, scaling with your installation count. Heavy automation that runs through a PAT will throttle long before an equivalent GitHub App."
+  - title: Polling instead of webhooks
+    body: "Many GitHub integrations poll `GET /repos/.../events` or `GET /notifications` every minute. That alone burns 60 RPH; combined with other reads, you'll hit the cap. Switch to webhooks or the events stream for change-driven updates."
+  - title: REST search API on its own tighter limit
+    body: "`GET /search/...` has a separate, much lower limit (30/min authenticated, 10/min unauthenticated). Hitting search rate limits returns the same 403 with `X-RateLimit-Resource: search`."
+  - title: Secondary (abuse) rate limit
+    body: "If you hammer a single endpoint with high concurrency, GitHub may return a 403 with `Retry-After` and a different message — the secondary rate limit. It's separate from the per-hour budget and triggers on burst patterns."
+fixes:
+  - title: Authenticate every request
+    likelihood: high
+    body: |
+      Unauthenticated 60/hour is a development convenience, not a production budget. Set the `Authorization: Bearer <token>` header on every call. PATs get 5,000/hour; fine-grained PATs and GitHub Apps get more.
+    code:
+      language: javascript
+      filename: github.js
+      code: |
+        import { Octokit } from "@octokit/rest";
+
+        const octokit = new Octokit({
+          auth: process.env.GITHUB_TOKEN,
+          // Octokit auto-handles primary rate limit and retries
+          throttle: {
+            onRateLimit: (retryAfter, options) => {
+              console.warn(`Rate limited on ${options.method} ${options.url}, retrying in ${retryAfter}s`);
+              return options.request.retryCount < 3;
+            },
+            onSecondaryRateLimit: (retryAfter, options) => {
+              console.warn(`Secondary rate limit on ${options.method} ${options.url}`);
+              return options.request.retryCount < 1;
+            },
+          },
+        });
+  - title: Honour X-RateLimit-Reset before retrying
+    likelihood: high
+    body: |
+      Don't retry blindly — `X-RateLimit-Reset` is a unix timestamp telling you exactly when the budget refills. Sleep until then (plus a small jitter) before the next call.
+    code:
+      language: python
+      filename: github_retry.py
+      code: |
+        import time, requests
+
+        def get(url, token, max_attempts=3):
+            for _ in range(max_attempts):
+                r = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+                if r.status_code != 403 or 'X-RateLimit-Remaining' not in r.headers:
+                    return r
+                if int(r.headers['X-RateLimit-Remaining']) > 0:
+                    return r
+                reset_at = int(r.headers['X-RateLimit-Reset'])
+                sleep_for = max(0, reset_at - int(time.time())) + 5
+                time.sleep(sleep_for)
+            r.raise_for_status()
+  - title: Use conditional requests to avoid spending quota
+    likelihood: high
+    body: |
+      Every GitHub REST response has an `ETag`. Send `If-None-Match: <etag>` on subsequent reads — if the data hasn't changed, GitHub returns 304 Not Modified and the call doesn't count against your rate limit.
+    code:
+      language: javascript
+      filename: conditional.js
+      code: |
+        const cache = new Map();
+
+        async function getRepo(owner, repo) {
+          const url = `https://api.github.com/repos/${owner}/${repo}`;
+          const headers = {
+            Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+          };
+          const cached = cache.get(url);
+          if (cached) headers['If-None-Match'] = cached.etag;
+          const r = await fetch(url, { headers });
+          if (r.status === 304) return cached.body;  // free read
+          const body = await r.json();
+          cache.set(url, { etag: r.headers.get('etag'), body });
+          return body;
+        }
+  - title: Move to GraphQL for batched reads
+    likelihood: medium
+    body: |
+      The GraphQL API uses a points-based budget — fewer round trips for the same data. A single query that fetches a repo, its open PRs, their reviewers, and their checks would be 4-5 REST calls but one GraphQL call costing maybe 20 points out of 5,000.
+  - title: Switch from PAT to GitHub App for sustained automation
+    likelihood: medium
+    body: |
+      A GitHub App installation gets up to 15,000/hour and scales with the number of installations. Bots, syncers, and CI integrations that hit PAT limits regularly should be GitHub Apps. The migration is mostly authentication plumbing — endpoints stay the same.
+detection: |
+  Log `X-RateLimit-Remaining` on every response and emit it as a metric. Alarm when remaining drops below 10% of the limit for more than 5 minutes — that's an incoming 403. For GitHub Apps, expose the metric per installation so you can see which one is the heavy user.
+related:
+  - 422-validation-failed-github
+  - access-denied-exception-aws
+  - throttling-exception-aws
+  - rate-limit-exceeded-openai
+  - secondary-rate-limit-github
+relatedHttp: 429
+relatedGuide: handling-rate-limits
+faq:
+  - q: Why does GitHub return 403 instead of 429 for rate limiting?
+    a: 'Historical reasons — GitHub''s API predates widespread 429 adoption. The 403 includes `X-RateLimit-Remaining: 0` and a body message explaining the limit, so it''s structurally distinct from auth-failure 403s. GitHub''s GraphQL API does return 403 too; some newer endpoints return 429.'
+  - q: What''s the difference between primary and secondary rate limits?
+    a: 'Primary limit is the per-hour budget (60/5000/15000 depending on auth). Secondary limit (also called abuse rate limit) triggers on burst patterns even when you have primary budget remaining — high concurrency on a single endpoint, repeated content-creation calls, or tight loops. Secondary limit responses include `Retry-After`.'
+  - q: Does the search API share the same 5,000/hour budget?
+    a: 'No. Search has its own bucket — 30 requests/minute for authenticated calls, 10/minute for unauthenticated. The response will tell you which resource you hit via `X-RateLimit-Resource: search`. Plan search-heavy workloads accordingly; consider caching SERP results or using webhook-driven discovery instead.'
+  - q: Are GraphQL and REST limits separate?
+    a: 'Yes. GraphQL uses a points-based 5,000/hour budget, separate from REST''s call-based 5,000/hour. Heavy clients can use both APIs concurrently to extend overall throughput, though you''ll still hit secondary limits if you''re abusive on either.'
+  - q: 'Why am I rate-limited on a GitHub Actions workflow?'
+    a: 'GitHub Actions runners share an exit IP pool with other Actions runners. If your workflow uses unauthenticated `curl` or `gh` calls, you''re sharing 60/hour with everyone else on that IP. Use `${{ secrets.GITHUB_TOKEN }}` for authenticated calls — Actions injects a token automatically scoped to the workflow.'
+  - q: How do I know my current rate-limit budget without making a call?
+    a: '`GET /rate_limit` returns your current usage and is itself free — it doesn''t count against any budget. Poll this when you suspect throttling but don''t want to risk a real call.'
+  - q: 'What''s the right retry strategy for secondary rate limits?'
+    a: 'Honour `Retry-After` (seconds), then add jitter and reduce concurrency on the offending endpoint. Unlike primary limits, secondary limits punish repeated bursts — so retrying with the same concurrency will trigger them again. Drop to single-threaded for the affected endpoint, then ramp back up.'
+  - q: Does authenticated traffic from one PAT count against another user''s PAT?
+    a: 'No. Rate limits are per-token. Two PATs from the same user have independent budgets (each 5,000/hour). You can technically split work across multiple tokens, but for sustained automation, GitHub Apps are the supported path.'
+escalate: |
+  Open a GitHub support ticket if (a) your GitHub App installation is consistently hitting 15,000/hour and you have a legitimate use case requiring more, (b) secondary rate limits are firing on calls that aren't bursty, or (c) the rate-limit headers contradict each other (e.g., `Remaining: 100` but you still get 403). For routine quota hits, support can't grant manual exceptions — switch to GraphQL, conditional requests, or App auth instead.
+languages:
+  - javascript
+  - python
+  - go
+  - ruby
+keywords:
+  - github rate limit
+  - github 403 rate limit
+  - github api rate limited
+  - octokit rate limit
+  - x-ratelimit-reset github
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+GitHub's 403 with `X-RateLimit-Remaining: 0` is the most common production blocker for any code that talks to the GitHub API. The fix is rarely "wait longer" — it's almost always one of: authenticate, use conditional requests, switch to GraphQL, or upgrade from PAT to GitHub App. Each move multiplies your effective quota by 5-100x.
+
+The single highest-leverage habit is conditional requests with ETags. Most GitHub data (repo metadata, branch SHAs, label lists) changes rarely. A naive integration that re-reads the same resource every minute spends 60 calls/hour per resource; the same code with `If-None-Match` spends maybe 3-5 because most reads return 304. That alone takes you from constant throttling to a comfortable margin.

@@ -1,0 +1,151 @@
+---
+service: anthropic
+code: overloaded_error
+slug: overloaded-error
+title: "Anthropic Error: overloaded_error — Claude API Overloaded (Cause + Fix)"
+plainTitle: Claude API Overloaded
+httpStatus: 529
+category: server
+severity: high
+tldrCause: "Anthropic's infrastructure is at capacity for the model you requested. This is server-side, not a problem with your code or your account — Claude is experiencing a traffic spike or capacity event and rejecting requests until load eases."
+tldrFix: "Retry with exponential backoff and jitter (start at 1-2 seconds, cap at ~30 seconds). If overload persists, fall back to a different Claude model (e.g., Sonnet → Haiku) or a backup provider. Check status.anthropic.com for incidents."
+contextCode:
+  language: python
+  filename: claude_call.py
+  code: |
+    import anthropic
+
+    client = anthropic.Anthropic()
+
+    try:
+        response = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+    except anthropic.APIStatusError as e:
+        # e.status_code == 529
+        # e.body['error']['type'] == 'overloaded_error'
+        # e.body['error']['message'] == 'Overloaded'
+        if e.status_code == 529:
+            # transient — retry with backoff
+            ...
+  caption: "HTTP 529 with `type: overloaded_error` is Anthropic's signal that the cluster is hot — retry, don't reconfigure."
+causes:
+  - title: Cluster-wide capacity event at Anthropic
+    body: "The most common cause — Anthropic's GPU/inference fleet for the requested model is saturated. Major causes include traffic spikes from a viral product (cursor, claude.ai outage), a model release attracting load, or a regional infra incident. status.anthropic.com tracks these as 'partial outage' or 'degraded performance' events."
+  - title: Specific model under heavier load than others
+    body: "Newer flagship models (Opus, the latest Sonnet) get hit hardest after release. Older or smaller models in the same family may have more headroom. Routing some traffic to Haiku or an older Sonnet snapshot during overloads keeps you serving."
+  - title: Regional or availability-zone issue
+    body: "Anthropic runs across multiple regions; a localised hardware fault can drop capacity in one zone while others are healthy. AWS Bedrock and GCP Vertex routes to Claude have their own zone exposure separate from the direct Anthropic API."
+  - title: Burst from your own traffic colliding with global load
+    body: "If you fan out 1,000 concurrent calls just as another large customer also bursts, Anthropic's per-region scheduler can shed load with `overloaded_error` rather than queue indefinitely. Smoothing your own bursts (token bucket, queue) reduces collision probability."
+  - title: Free-tier or low-tier deprioritisation during contention
+    body: "Anthropic prioritises higher-tier paid traffic during capacity events. Free-trial keys and tier-1 paid orgs see `overloaded_error` more often than tier-3+ enterprise traffic when global demand peaks. Upgrading via spend reduces — but doesn't eliminate — the rate."
+fixes:
+  - title: Retry with exponential backoff and jitter
+    likelihood: high
+    body: |
+      `overloaded_error` is transient — most resolve in 1-30 seconds. Retry up to 5 times with exponential backoff (1s, 2s, 4s, 8s, 16s) and 25% jitter. The Anthropic SDK does some auto-retry; supplement it with your own bounded loop for production resilience.
+    code:
+      language: python
+      filename: retry.py
+      code: |
+        import time, random
+        import anthropic
+
+        client = anthropic.Anthropic()
+
+        def call_with_retry(messages, model="claude-opus-4-5", max_attempts=5):
+            for attempt in range(max_attempts):
+                try:
+                    return client.messages.create(
+                        model=model, max_tokens=1024, messages=messages,
+                    )
+                except anthropic.APIStatusError as e:
+                    if e.status_code != 529 or attempt == max_attempts - 1:
+                        raise
+                    backoff = (2 ** attempt) + random.uniform(0, 1)
+                    time.sleep(min(backoff, 30))
+  - title: Fall back to a different model on overload
+    likelihood: high
+    body: |
+      Maintain a fallback chain: `claude-opus-4-5` → `claude-sonnet-4-5` → `claude-haiku-4-5`. Smaller models have larger fleets and lower contention. For latency-sensitive paths, fail over within 2-3 seconds rather than burning the full backoff budget on the primary model.
+    code:
+      language: python
+      filename: fallback.py
+      code: |
+        FALLBACK = ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"]
+
+        def call_with_fallback(messages, max_tokens=1024):
+            last_err = None
+            for model in FALLBACK:
+                try:
+                    return client.messages.create(
+                        model=model, max_tokens=max_tokens, messages=messages,
+                    )
+                except anthropic.APIStatusError as e:
+                    if e.status_code != 529:
+                        raise
+                    last_err = e
+            raise last_err
+  - title: Multi-provider failover (AWS Bedrock or GCP Vertex)
+    likelihood: medium
+    body: |
+      The same Claude models are available via AWS Bedrock and GCP Vertex AI. Their capacity pools are separate from Anthropic's direct API — when one is overloaded, the others often aren't. Set up the alternative SDKs and switch providers at the load-balancer or app layer when 529s spike."
+  - title: Use the Message Batches API for non-realtime work
+    likelihood: medium
+    body: |
+      The Batches API processes up to 100k requests asynchronously and is much less prone to `overloaded_error` because it runs on a separate, queued capacity pool. If your workload tolerates 24h latency, batches are 50% cheaper *and* more reliable."
+  - title: Smooth your own bursts with a token bucket
+    likelihood: low
+    body: |
+      Pre-empting bursts on your side reduces the probability of colliding with global contention. A simple in-memory token-bucket limiter that holds you at ~80% of your tier RPM converts spikes into a queue, not a wave of 529s.
+detection: |
+  Track `overloaded_error` rate per model as a separate metric from rate-limits. Plot it against status.anthropic.com incidents to correlate. Alert if 529s exceed 5% of requests for a single model over a 5-minute window — that's a signal to flip your traffic over to the fallback model or a different provider. A sustained 0% rate at scale is unrealistic; aim for <1%.
+related:
+  - rate-limit-error
+  - authentication-error
+  - rate-limit-exceeded
+  - context-length-exceeded
+  - insufficient-quota
+relatedHttp: 529
+relatedGuide: claude-resilience-patterns
+faq:
+  - q: "What does HTTP 529 mean? It's not in the standard HTTP spec."
+    a: "HTTP 529 is a non-standard status code Anthropic adopted (also used by Shopify and others) to mean 'site is overloaded.' It's deliberately distinct from 503 (service unavailable) and 429 (rate limit) so clients can route the response correctly. Treat 529 as a transient-server signal, retry with backoff."
+  - q: "Is `overloaded_error` ever caused by something I did wrong?"
+    a: "Almost never. It's a server-side capacity signal. The only client-side correlation is bursting many requests in a tight window during a global contention event — your traffic colliding with everyone else's. Smoothing your own bursts helps, but the root cause is on Anthropic's side."
+  - q: "How long do `overloaded_error` events typically last?"
+    a: "Most resolve in under a minute. Major incidents (model release day, regional outage) can last hours. status.anthropic.com posts incident updates within ~10 minutes of detection. Build alarms that flip your traffic to a fallback model after 60 seconds of sustained 529s."
+  - q: "Should I retry `overloaded_error` indefinitely?"
+    a: "No. Bound retries to 5 attempts max, with capped backoff (~30 seconds). Beyond that, fall back or fail. Infinite retry holds connections open during the outage and creates a thundering herd when capacity recovers, often re-triggering the overload."
+  - q: "Do `overloaded_error` failures count toward my usage or rate limits?"
+    a: "No — failed requests don't consume tokens or count against your RPM/TPM/ITPM tier limits. You're free to retry without burning quota. Successful retries on the second attempt do consume tokens for the successful response."
+  - q: "Are higher-tier paid customers prioritised during overloads?"
+    a: "Yes. Anthropic's published guidance is that higher usage tiers and Priority Tier (Bedrock/Vertex contractual) get scheduling priority during contention. Free-trial and tier-1 traffic is the first to see 529s. Tier upgrades happen automatically with paid spend over time."
+  - q: "Can I tell the difference between `overloaded_error` and `api_error`?"
+    a: "Yes — `overloaded_error` is HTTP 529 with `type: overloaded_error`, meaning capacity. `api_error` is HTTP 500 with `type: api_error`, meaning an unexpected internal failure. Treat both as retryable, but log them separately — repeated `api_error` on the same input may be a real bug worth reporting."
+  - q: "Does using streaming reduce overload exposure?"
+    a: "No. Streaming changes only response delivery; it doesn't change scheduling priority. A streaming request can still receive 529 before it begins, or a connection error mid-stream during severe overloads. Apply the same retry/fallback logic on streaming endpoints."
+escalate: |
+  Escalate to Anthropic support only if (a) you're seeing sustained `overloaded_error` rates above 10% for hours with no incident on the status page, suggesting an account-specific routing issue, (b) you're on a Priority Tier (Bedrock/Vertex commitment) and not seeing the contracted availability, or (c) overload is affecting the Batches API or the file storage endpoints, which should be insulated from realtime contention. For routine 529s during traffic spikes, retry + fallback is the answer.
+languages:
+  - python
+  - javascript
+  - go
+  - ruby
+keywords:
+  - anthropic overloaded_error
+  - claude 529
+  - claude api overloaded
+  - anthropic capacity error
+  - claude server overload
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`overloaded_error` is Anthropic's signal that the Claude inference fleet is at capacity for the model you asked for. It returns HTTP 529 — a non-standard status code Anthropic shares with a handful of other services to mean specifically "we're hot, slow down or come back." It's not a rate limit (which is 429) and it's not a generic server error (which is 500); it's a capacity signal you should react to with retry and fallback, not reconfiguration.
+
+The right response is mechanical: bounded exponential backoff with jitter, then a fallback to a smaller-fleet model (Haiku) or an alternate provider (Bedrock, Vertex), then a circuit-break that gives up cleanly. Combined with a status-page subscription and per-model 529 metrics, you can keep serving traffic through capacity events that take competitors offline.

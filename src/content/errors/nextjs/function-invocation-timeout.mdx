@@ -1,0 +1,165 @@
+---
+service: nextjs
+code: FUNCTION_INVOCATION_TIMEOUT
+slug: function-invocation-timeout
+title: "Next.js Error: FUNCTION_INVOCATION_TIMEOUT — Serverless Function Timed Out (Cause + Fix)"
+plainTitle: Function Invocation Timeout
+httpStatus: 504
+category: runtime
+severity: high
+tldrCause: A Vercel serverless function (a Next.js API route, server action, or `getServerSideProps`) didn't return a response within the plan's max execution time — 10s on Hobby, 60s on Pro, 900s on Enterprise. Vercel kills the invocation and returns 504.
+tldrFix: Find which downstream call is slow (database, third-party API, LLM streaming) and either return faster, stream the response, move work to a queue/cron, or upgrade to a longer-timeout plan. Don't just bump the timeout — diagnose the latency first.
+contextCode:
+  language: text
+  filename: vercel-response-headers
+  code: |
+    HTTP/2 504 Gateway Timeout
+    x-vercel-error: FUNCTION_INVOCATION_TIMEOUT
+    x-vercel-id: lhr1::iad1::abc123-1714138800000-xyz
+    server: Vercel
+
+    An error occurred with your deployment
+
+    FUNCTION_INVOCATION_TIMEOUT
+  caption: Vercel's edge returns a 504 with the error code in the `x-vercel-error` header. The `x-vercel-id` is what you need to look up in the dashboard logs.
+causes:
+  - title: Slow downstream API call without a timeout of its own
+    body: "Your function calls Stripe, OpenAI, or your own backend without an explicit timeout. The downstream hangs at 30+ seconds and your fetch doesn't abort. Vercel kills the function before the upstream replies. Most production timeouts are this case."
+  - title: Database query without an index
+    body: "A `SELECT … WHERE col = ?` against a table with 5M rows and no index on `col` runs for the full execution budget. Postgres `EXPLAIN ANALYZE` reveals a Seq Scan; the fix is an index, not a longer timeout."
+  - title: Doing batch/CPU work in a request handler
+    body: "Generating PDFs, processing CSVs, calling an LLM with a 30s reasoning budget, or running ETL inside an API route. Serverless functions are for fast request/response, not for queue workers. The right fix is offloading."
+  - title: Streaming response not properly flushed
+    body: "Returning an LLM streaming response from a function that doesn't actually stream — the platform buffers and counts the full duration as one synchronous request. Use the Web Streams API and return a `ReadableStream` so chunks ship as they arrive."
+  - title: Cold start + slow init compounding
+    body: "Cold start adds 1–3s. If your function then opens a fresh DB connection, loads a 50MB ML model, or hits a slow downstream, total time can blow the budget. Especially common on functions that aren't called often enough to stay warm."
+fixes:
+  - title: Set explicit fetch timeouts shorter than the platform timeout
+    likelihood: high
+    body: |
+      Never let an external call run as long as the function budget — wrap it in `AbortSignal.timeout()` so a slow upstream returns a clean error inside your function instead of getting killed by the platform.
+    code:
+      language: typescript
+      filename: app/api/lookup/route.ts
+      code: |
+        export async function GET(req: Request) {
+          try {
+            const res = await fetch('https://slow-upstream.example/api', {
+              signal: AbortSignal.timeout(8000), // 8s, leaves headroom on a 10s plan
+            });
+            const data = await res.json();
+            return Response.json(data);
+          } catch (err) {
+            if (err instanceof DOMException && err.name === 'TimeoutError') {
+              return Response.json(
+                { error: 'upstream_timeout' },
+                { status: 504 },
+              );
+            }
+            throw err;
+          }
+        }
+  - title: Stream long responses instead of buffering
+    likelihood: high
+    body: |
+      For LLMs and any response over a couple of seconds, return a `ReadableStream`. Vercel's timeout starts ticking but the response begins flowing immediately, the user sees progress, and you stay well clear of the budget.
+    code:
+      language: typescript
+      filename: app/api/chat/route.ts
+      code: |
+        import OpenAI from 'openai';
+
+        export const runtime = 'edge';   // edge has its own timeout rules
+        export const dynamic = 'force-dynamic';
+
+        const client = new OpenAI();
+
+        export async function POST(req: Request) {
+          const { messages } = await req.json();
+          const completion = await client.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages,
+            stream: true,
+          });
+
+          const stream = new ReadableStream({
+            async start(controller) {
+              for await (const chunk of completion) {
+                const text = chunk.choices[0]?.delta?.content ?? '';
+                controller.enqueue(new TextEncoder().encode(text));
+              }
+              controller.close();
+            },
+          });
+
+          return new Response(stream, {
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          });
+        }
+  - title: Move slow work to a queue or cron
+    likelihood: high
+    body: |
+      For anything that's legitimately slow (PDF generation, CSV exports, batch emails, deep reports), accept the request, write a job row, return 202, and process it in a background worker. Inngest, Trigger.dev, QStash, or a Vercel Cron + DB job-queue table all work.
+  - title: Configure the function's `maxDuration` (Pro/Enterprise)
+    likelihood: medium
+    body: |
+      On Pro you can lift any single function up to 60s. On Enterprise up to 900s. Don't apply globally — only to the routes that genuinely need it, since longer timeouts cost more and hide latency bugs.
+    code:
+      language: typescript
+      filename: app/api/report/route.ts
+      code: |
+        export const maxDuration = 60; // seconds. Pro plan max.
+
+        export async function POST() {
+          // Heavy work...
+        }
+  - title: Add a database index, or move the slow query off the request path
+    likelihood: medium
+    body: |
+      Run `EXPLAIN ANALYZE` on the suspect query. Seq Scans on big tables, missing composite indexes, and full-table sorts are all fixable with a single `CREATE INDEX`. If indexing isn't enough, materialize the result into a summary table that you query in O(1).
+detection: |
+  Track 504s in your error monitor with the `x-vercel-id` value attached so you can pull the exact invocation log. Add p95 + p99 latency dashboards per route — a function that took 1s last week and 9s today is about to start timing out, which is much easier to fix proactively than reactively. Alert when p95 exceeds 70% of your `maxDuration`.
+related:
+  - hydration-failed-nextjs
+  - module-not-found-nextjs
+  - econnrefused-nodejs
+  - heap-out-of-memory-nodejs
+  - rate-limit-exceeded-openai
+relatedHttp: 504
+relatedGuide: vercel-function-timeouts
+faq:
+  - q: What's the actual timeout on Vercel for each plan?
+    a: "Hobby: 10 seconds, hard cap, can't be raised. Pro: default 10s but per-function `maxDuration` can be set up to 60s. Enterprise: up to 900s (15 min) per function. Edge runtime has different limits — 25s for the default response window with streaming allowed up to 30 minutes after the first byte. Always check vercel.com/docs/functions/configuring-functions/duration for current values."
+  - q: "Why does my function still time out at 10s after setting `maxDuration = 60`?"
+    a: "You're on the Hobby plan, where `maxDuration` is ignored. Or you set `maxDuration` in the wrong file (it must be in the route handler itself, not in `next.config.js`). Or you're using the Edge runtime, which has its own timeout semantics. Check the response header `x-vercel-execution-region` and the deployment's plan tier."
+  - q: Does streaming a response prevent the timeout from firing?
+    a: "On the Node serverless runtime, no — the function still has to complete within the timeout, even if it's streaming. On the Edge runtime, yes — once the first byte ships, you can stream for much longer (up to 30 min). For LLM responses, prefer the Edge runtime + streaming."
+  - q: How is `FUNCTION_INVOCATION_TIMEOUT` different from a regular HTTP 504?
+    a: "Generic 504 means a gateway/proxy timed out waiting for an upstream. `FUNCTION_INVOCATION_TIMEOUT` is Vercel-specific: your function ran past its allotted budget and the platform terminated it. The HTTP status is 504 in both cases, but the `x-vercel-error` header tells you which side the timeout came from."
+  - q: Will increasing `maxDuration` fix the underlying slowness?
+    a: "No — it just delays the timeout. If your DB query takes 12 seconds today, it'll take 14 seconds when the table grows. The right fix is to make the work fast (index, cache, smaller payload) or async (queue, cron). Use higher `maxDuration` only when the work has a hard reason to be synchronous and slow (e.g., user-triggered PDF generation under 60s)."
+  - q: Why does my function time out only sometimes?
+    a: "Cold starts add 0.5–3s. If your warm latency is p50 of 7s, your cold-start p95 will be over 10s and you'll see intermittent timeouts. Also: downstream latency can spike (Stripe, OpenAI, your own DB during a vacuum). Look at p95/p99 latency in the Vercel dashboard, not p50."
+  - q: Can I retry a 504 from FUNCTION_INVOCATION_TIMEOUT?
+    a: "Be careful — the work may have completed server-side even though the client got 504. If your handler isn't idempotent (e.g., it charges a card, sends an email, or inserts a row), retrying duplicates the side effect. Use idempotency keys on any operation that costs money or has external side effects."
+  - q: Does the timeout count cold-start time?
+    a: "Yes — cold start is part of the function's wall clock. Vercel doesn't pause the budget for init. Optimize cold start by lazy-loading heavy modules, avoiding top-level await on slow resources, and keeping the function bundle small (< 1MB ideally)."
+escalate: |
+  Open a Vercel support ticket with the `x-vercel-id` header value and the deployment URL when (a) the same function consistently times out at well under its configured `maxDuration`, (b) the dashboard shows function duration much shorter than the 504 you're seeing client-side, or (c) you suspect a Vercel-region-specific issue. For "my function is slow" — that's an application performance problem, not a platform bug.
+languages:
+  - typescript
+  - javascript
+keywords:
+  - vercel function timeout
+  - FUNCTION_INVOCATION_TIMEOUT
+  - nextjs serverless timeout
+  - vercel 504
+  - nextjs api route timeout
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`FUNCTION_INVOCATION_TIMEOUT` is Vercel's signal that your serverless function ran past its allotted budget and the platform killed it. The HTTP response is 504, the `x-vercel-error` header carries the code, and the `x-vercel-id` lets you pull the exact invocation log from the dashboard. The fix isn't usually to extend the timeout — it's to find the slow downstream and either speed it up, stream around it, or move it off the request path entirely.
+
+Most production timeouts trace to one of three things: an upstream API call without its own abort signal, a missing database index, or batch work running inside a request handler when it should be in a queue. All three are diagnosable in minutes if you have p95 latency dashboards and an `x-vercel-id` to look up.

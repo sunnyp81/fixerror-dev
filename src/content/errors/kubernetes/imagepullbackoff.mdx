@@ -1,0 +1,170 @@
+---
+service: kubernetes
+code: ImagePullBackOff
+slug: imagepullbackoff
+title: "Kubernetes Error: ImagePullBackOff — Cannot Pull Container Image (Cause + Fix)"
+plainTitle: Image Pull Back Off
+category: config
+severity: high
+tldrCause: The kubelet failed to pull the container image and is now backing off retry attempts. Underlying error is one of ErrImagePull, ImagePullBackOff is the recovery loop. Causes are almost always image name/tag wrong, registry auth missing, registry rate-limit, or the image genuinely doesn't exist for the node's architecture.
+tldrFix: "`kubectl describe pod <pod>` and read the Events section — the actual pull error is there. Verify the image name + tag with `docker pull <image>` (or `crane manifest <image>`) from outside K8s, fix the imagePullSecret if it's a private registry, and confirm the architecture matches the node (linux/amd64 vs linux/arm64)."
+contextCode:
+  language: text
+  filename: kubectl-describe-pod
+  code: |
+    Events:
+      Type     Reason   Age                From     Message
+      ----     ------   ----               ----     -------
+      Normal   Pulling  2m (x4 over 5m)    kubelet  Pulling image "myapp:v2.3.1"
+      Warning  Failed   2m (x4 over 5m)    kubelet  Failed to pull image "myapp:v2.3.1": rpc error: code = Unknown desc = Error response from daemon: manifest for myapp:v2.3.1 not found: manifest unknown
+      Warning  Failed   2m (x4 over 5m)    kubelet  Error: ErrImagePull
+      Normal   BackOff  30s (x10 over 5m)  kubelet  Back-off pulling image "myapp:v2.3.1"
+      Warning  Failed   30s (x10 over 5m)  kubelet  Error: ImagePullBackOff
+  caption: The Events list always tells you the real error — `manifest unknown` here means the tag doesn't exist in the registry.
+causes:
+  - title: Wrong image name or tag
+    body: "Typo in the image reference, tag that doesn't exist (someone deleted `:latest`, or you referenced a tag from another repo), or the registry returned a manifest-unknown response. `kubectl describe pod` shows the exact registry error."
+  - title: Private registry auth missing or wrong
+    body: "The image is in a private registry (ECR, GCR, GHCR, Docker Hub private repos) and the pod has no `imagePullSecrets` or the secret's docker-config is wrong/expired. ECR tokens expire every 12 hours unless you're using IRSA/Workload Identity."
+  - title: Architecture mismatch (arm64 vs amd64)
+    body: "Image was built for `linux/amd64` but the node is `linux/arm64` (Graviton, Apple Silicon-based dev cluster) or vice versa. The pull succeeds, then fails with 'no matching manifest for linux/arm64 in the manifest list entries.' Common with single-arch images and modern ARM nodes."
+  - title: Registry rate-limit (Docker Hub anonymous)
+    body: "Docker Hub limits anonymous pulls to 100/6h per IP. Busy clusters share an egress IP and get 429s as `toomanyrequests: You have reached your pull rate limit`. Fix is to authenticate (free tier gets 200/6h, paid more) or mirror images to your own registry."
+  - title: Network egress blocked or DNS broken
+    body: "Pod's node can't reach the registry — VPC egress denied, NAT gateway saturated, or CoreDNS can't resolve the registry hostname. Less common than the above but produces an ImagePullBackOff with a TCP/DNS error in the Events."
+fixes:
+  - title: Read kubectl describe pod's Events section
+    likelihood: high
+    body: |
+      The first command on every ImagePullBackOff. The Events list shows the exact reason from the kubelet, which is one of: manifest unknown, unauthorized, no matching manifest, rate limit, or network error. Each maps to a different fix.
+    code:
+      language: bash
+      filename: diagnose.sh
+      code: |
+        # Find the failing pod:
+        kubectl get pods -A | grep -E 'ImagePullBackOff|ErrImagePull'
+
+        # Read the events:
+        kubectl describe pod <pod-name> -n <namespace> | grep -A 30 Events:
+
+        # Or filter events directly:
+        kubectl get events -n <namespace> --sort-by=.lastTimestamp \
+          | grep <pod-name>
+  - title: Verify the image is pullable outside Kubernetes
+    likelihood: high
+    body: |
+      Reproduce the pull from your laptop or a test node. If `docker pull` (or `crane`/`skopeo`) fails the same way, the issue is the image, the tag, or registry auth — not Kubernetes. If it succeeds outside but fails inside, the issue is the cluster's auth or egress.
+    code:
+      language: bash
+      filename: verify-image.sh
+      code: |
+        # Try the pull as the cluster would see it:
+        docker pull myregistry.example/team/app:v2.3.1
+
+        # Inspect manifest without pulling layers:
+        crane manifest myregistry.example/team/app:v2.3.1
+
+        # Check what platforms a multi-arch manifest supports:
+        docker buildx imagetools inspect myregistry.example/team/app:v2.3.1
+  - title: Add or fix imagePullSecrets for private registries
+    likelihood: high
+    body: |
+      For private registries, the pod (via its ServiceAccount) needs a docker-registry secret. ECR, GCR, ACR all have native cloud-IAM alternatives (IRSA on EKS, Workload Identity on GKE) — prefer those over long-lived secrets.
+    code:
+      language: yaml
+      filename: pull-secret.yaml
+      code: |
+        # 1. Create the secret (one-time, repeat per namespace):
+        # kubectl create secret docker-registry regcred \
+        #   --docker-server=myregistry.example \
+        #   --docker-username=<user> \
+        #   --docker-password=<pat-or-password> \
+        #   -n production
+
+        # 2. Reference it in the pod spec or service account:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: app-sa
+          namespace: production
+        imagePullSecrets:
+          - name: regcred
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: app
+          namespace: production
+        spec:
+          template:
+            spec:
+              serviceAccountName: app-sa
+              containers:
+                - name: app
+                  image: myregistry.example/team/app:v2.3.1
+  - title: Build multi-arch images for mixed-architecture clusters
+    likelihood: medium
+    body: |
+      If your cluster has Graviton/ARM nodes, your images need an `arm64` variant in their manifest list. `docker buildx build --platform linux/amd64,linux/arm64 --push` produces one. Mixed-arch is increasingly common — assume it.
+    code:
+      language: bash
+      filename: multiarch-build.sh
+      code: |
+        # One-time setup:
+        docker buildx create --use --name multiarch
+        docker buildx inspect --bootstrap
+
+        # Build + push amd64 and arm64 in one manifest list:
+        docker buildx build \
+          --platform linux/amd64,linux/arm64 \
+          -t myregistry.example/team/app:v2.3.1 \
+          --push .
+  - title: Authenticate to Docker Hub or move to a private mirror
+    likelihood: low
+    body: |
+      For Docker Hub rate-limit errors, log in (raises limit to 200/6h), pay for a Pro account (no limit), or mirror frequently-pulled public images to your own ECR/GCR. Distroless and base images especially benefit from a registry mirror inside your VPC.
+detection: |
+  Track ImagePullBackOff at cluster level — Prometheus + kube-state-metrics exposes `kube_pod_status_reason{reason="ImagePullBackOff"}`. Alert when any pod is in this state for >5 minutes; for production deployments, ImagePullBackOff after a deploy means the rollout will time out and traffic stays on the old version. Also alert on ECR token expiry (use a CronJob to refresh, or migrate to IRSA).
+related:
+  - crashloopbackoff-kubernetes
+  - module-not-found-error-python
+  - module-not-found-nextjs
+  - err-require-esm-nodejs
+  - econnrefused-nodejs
+relatedGuide: kubernetes-image-pull-debugging
+faq:
+  - q: What's the difference between ErrImagePull and ImagePullBackOff?
+    a: "ErrImagePull is the immediate failure — the kubelet tried, the pull errored. ImagePullBackOff is the state when the kubelet has hit ErrImagePull repeatedly and is now waiting (with exponential backoff) before retrying. Functionally the same root cause; ImagePullBackOff just means several retries have already failed."
+  - q: How do I see the actual error message from the registry?
+    a: "`kubectl describe pod <pod>` and look at the Events section — the kubelet logs the registry's exact error string. Common ones: `manifest unknown` (wrong tag), `unauthorized` (auth issue), `no matching manifest for linux/arm64` (architecture mismatch), `toomanyrequests` (Docker Hub rate limit). For deeper debugging, `kubectl get events -n <ns> --sort-by=.lastTimestamp` shows everything."
+  - q: My ECR pull worked yesterday and fails today.
+    a: "Almost certainly an expired ECR token. Manual `kubectl create secret docker-registry` produces a 12-hour token. Rotate with a CronJob that runs `aws ecr get-login-password` and re-creates the secret, or migrate to IRSA (EKS) which gives pods AWS credentials directly with no secret to expire."
+  - q: Why does the same image work on one node but ImagePullBackOff on another?
+    a: "Two likely causes: (1) the failing node is a different architecture (arm64 vs amd64) and the image is single-arch. (2) the failing node is in a different VPC/subnet with restricted egress to the registry. Run `kubectl get nodes -o wide` to see node OS/architecture; run a debug pod on the failing node and try the pull manually."
+  - q: "Is `imagePullPolicy: Always` causing my problem?"
+    a: "It can amplify it — `Always` means the kubelet pulls from the registry every restart, multiplying your registry traffic and exposing every transient registry error. Use `IfNotPresent` for production with immutable tags (or specific SHA digests) and `Always` only when you must use mutable tags like `:latest`."
+  - q: Can I retry a failed image pull manually?
+    a: "Delete the pod — the deployment/replicaset recreates it and the kubelet retries the pull. `kubectl delete pod <pod>` is the standard way. For a deployment that's still ImagePullBackOff, fix the underlying issue (image name, secret) first; retrying without a fix just hits the same error."
+  - q: My image is in Docker Hub and public. Why am I getting unauthorized?
+    a: "Docker Hub returns `unauthorized` (not `toomanyrequests`) when anonymous pull rate-limits are hit on busy clusters — it's a slightly misleading error string. Authenticate (even on a free account) to confirm; if the same image pulls fine while authenticated, the rate-limit was the cause. Long-term fix is mirroring or paid Docker Hub."
+  - q: How do I make sure imagePullSecrets are picked up?
+    a: "The secret must exist in the same namespace as the pod, and it must be referenced either on the pod spec (`imagePullSecrets:`) or on the pod's ServiceAccount. ServiceAccount-level is preferable — every pod using that SA inherits it. Common bug: secret created in `default` namespace but pod runs in `production` — secrets aren't cross-namespace."
+escalate: |
+  Escalate to your cluster admin or cloud team if (a) ImagePullBackOff is happening only from one node pool (network/egress issue), (b) the registry returns 5xx errors persistently (registry-side outage), or (c) your IRSA/Workload Identity is configured but pods still get unauthorized (IAM trust policy mismatch). For the registry itself: open a ticket with the registry vendor including the failing image reference and a packet capture if possible.
+languages:
+  - yaml
+  - bash
+keywords:
+  - kubernetes imagepullbackoff
+  - errimagepull
+  - kubernetes pull image failed
+  - imagepullsecrets
+  - kubernetes registry auth
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`ImagePullBackOff` is the kubelet telling you it tried to pull your image, failed, retried, failed again, and is now waiting before the next attempt. It's not actually the error — it's the back-off state. The real error is one of `manifest unknown`, `unauthorized`, `no matching manifest`, `toomanyrequests`, or a network failure, and you find it in `kubectl describe pod`'s Events list.
+
+The five causes are almost evenly distributed in production: typos, expired registry credentials, architecture mismatches, Docker Hub rate-limits, and egress problems. Each has a single, mechanical fix once you know which one applies — so spend 30 seconds reading Events before you change anything.

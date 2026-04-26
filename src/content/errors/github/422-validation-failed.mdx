@@ -1,0 +1,157 @@
+---
+service: github
+code: "422_validation_failed"
+slug: 422-validation-failed
+title: 'GitHub Error: 422 Validation Failed — Invalid Request Body (Cause + Fix)'
+plainTitle: REST API Validation Failed
+httpStatus: 422
+category: validation
+severity: medium
+tldrCause: GitHub parsed your request but rejected one or more fields — typically a missing required field, a value that breaks a uniqueness constraint, an invalid SHA, or a referenced resource that doesn't exist (e.g., a label name that hasn't been created on the repo).
+tldrFix: Read the `errors` array in the response body — each entry names the field, the resource, and the specific validation code (`missing_field`, `already_exists`, `invalid`, `unprocessable`). Fix that field and resubmit.
+contextCode:
+  language: text
+  filename: response.txt
+  code: |
+    HTTP/1.1 422 Unprocessable Entity
+    Content-Type: application/json
+
+    {
+      "message": "Validation Failed",
+      "errors": [
+        {
+          "resource": "PullRequest",
+          "code": "custom",
+          "message": "A pull request already exists for owner:branch."
+        }
+      ],
+      "documentation_url": "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+      "status": "422"
+    }
+  caption: "Every 422 includes an `errors` array. Each item names the resource, code, and a human message — read it before changing code."
+causes:
+  - title: Missing required field
+    body: "POST endpoints often require fields the docs only mention in passing. Creating an issue without `title`, opening a PR without `head`/`base`, or pushing a release without `tag_name` returns `code: missing_field` with the field name."
+  - title: Uniqueness conflict
+    body: "GitHub enforces uniqueness on PR head/base pairs (one open PR per branch combo), label names per repo, deploy keys per repo, and webhook URLs. Re-submitting with the same key returns `code: already_exists` or `code: custom`."
+  - title: Referenced resource doesn't exist
+    body: "Adding a non-existent label to an issue, requesting review from a user not in the org, or creating a PR with a `head` branch that no longer exists returns `code: invalid` on that field. The branch / label / user must exist before you can reference it."
+  - title: Bad SHA or ref format
+    body: "Many endpoints accept a SHA or ref. A truncated SHA (less than 4 chars), a non-existent SHA, or a ref starting with `refs/heads/refs/heads/` returns 422 with `code: invalid` on the ref/sha field."
+  - title: Field value out of allowed range
+    body: "Numeric fields (e.g., `per_page` max 100), enum fields (`state` must be `open` or `closed`), and string-length fields each have limits. Exceeding them returns 422 with `code: invalid` and the violating field name."
+fixes:
+  - title: Parse the errors array — don't just log message
+    likelihood: high
+    body: |
+      The top-level `message` is always "Validation Failed" — useless for debugging. The actionable detail is in `errors[].code` plus `errors[].field`. Surface that to your logs and your users.
+    code:
+      language: javascript
+      filename: handleValidation.js
+      code: |
+        async function createIssue(owner, repo, body) {
+          const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+          });
+          if (r.status === 422) {
+            const err = await r.json();
+            const detail = err.errors.map(e => `${e.resource}.${e.field || ''}: ${e.code} (${e.message || ''})`).join('; ');
+            throw new Error(`GitHub 422: ${detail}`);
+          }
+          return r.json();
+        }
+  - title: Pre-validate against the schema before sending
+    likelihood: high
+    body: |
+      For frequent calls (issue creation, PR creation, release publishing), validate locally against the OpenAPI schema. Catches missing fields and bad enums before the round trip.
+    code:
+      language: python
+      filename: validate.py
+      code: |
+        REQUIRED_FOR_PR = ('title', 'head', 'base')
+
+        def validate_pr_body(body):
+            missing = [k for k in REQUIRED_FOR_PR if not body.get(k)]
+            if missing:
+                raise ValueError(f"Missing required fields: {missing}")
+            if body.get('head', '').startswith('refs/'):
+                raise ValueError("`head` should be a branch name, not a ref")
+  - title: Handle already_exists idempotently
+    likelihood: high
+    body: |
+      For "create" endpoints with uniqueness constraints, treat 422 with `already_exists` (or "already exists" in the message) as success. List the existing resource and continue rather than failing the whole job.
+    code:
+      language: javascript
+      filename: idempotent.js
+      code: |
+        async function ensureLabel(octokit, owner, repo, name, color) {
+          try {
+            return await octokit.issues.createLabel({ owner, repo, name, color });
+          } catch (err) {
+            if (err.status === 422 && /already_exists|already exists/i.test(JSON.stringify(err.response.data))) {
+              return octokit.issues.getLabel({ owner, repo, name });
+            }
+            throw err;
+          }
+        }
+  - title: Refresh stale references before retrying
+    likelihood: medium
+    body: |
+      A 422 with `code: invalid` on a SHA or branch usually means the ref moved. Fetch the latest `heads/<branch>` SHA and resubmit with the fresh value. Don't retry blindly with the same stale SHA.
+  - title: Use the API explorer to confirm payload shape
+    likelihood: low
+    body: |
+      docs.github.com/rest has a "Try it out" panel that constructs a known-valid payload for every endpoint. When in doubt, copy that payload, run it, then diff against what your code is sending.
+detection: |
+  Tag 422 errors by `errors[0].resource` + `errors[0].code` so they cluster in your error tracker. Most 422s are bugs in your client code (you should never see them in steady state). A spike usually means a deployed schema change in your code or a deprecation in GitHub's API.
+related:
+  - 403-rate-limit-github
+  - secondary-rate-limit-github
+  - access-denied-exception-aws
+  - card-declined-stripe
+  - validation-error-stripe
+relatedHttp: 422
+relatedGuide: github-api-errors
+faq:
+  - q: 'Why does GitHub return 422 instead of 400?'
+    a: '422 Unprocessable Entity is the correct status for "syntax was fine, semantics were not." 400 is for malformed requests (bad JSON, missing Content-Type). GitHub uses 400 for those and 422 when your JSON parses but a field fails validation. Both are client-side bugs, but the fix is different.'
+  - q: '`code: custom` doesn''t tell me what''s wrong. How do I debug it?'
+    a: 'When `code: custom`, the actionable detail is in the `message` field, not the code. Read `errors[0].message` — it''s a human sentence describing the failure (e.g., "A pull request already exists for foo:bar"). Don''t use the code alone for routing logic when it''s `custom`.'
+  - q: 'Should I retry a 422 automatically?'
+    a: 'No. 422 means your request is wrong; retrying the same request will fail the same way. Fix the input first. The exception is `already_exists` — treat that as success and move on (idempotency), not as a failure to retry.'
+  - q: 'Why does creating a PR with the same head/base twice return 422?'
+    a: 'GitHub allows only one open PR per (head, base) pair per repo. The second create call returns 422 with a `custom` error pointing at the existing PR. Treat this like idempotent create: list open PRs for that branch combo and reuse the existing one.'
+  - q: 'I get 422 on a webhook create — but the webhook URL is valid. Why?'
+    a: 'GitHub validates webhook URLs by attempting a ping. If the ping fails (DNS error, TLS error, 5xx), the create returns 422 with a message like "Hook URL is invalid." Make sure the URL is reachable from public internet before creating, or test with a known-good service like webhook.site first.'
+  - q: 'Does 422 count against my rate limit?'
+    a: 'Yes. Every API call counts against your primary rate limit regardless of status code. Repeated 422s on a buggy integration can drain your hourly budget fast. Catch the error early in your code path so you don''t resubmit the bad request multiple times.'
+  - q: 'Why is my issue title rejected with 422?'
+    a: 'Issue titles must be non-empty and under 256 characters. GitHub also strips leading/trailing whitespace — a title that''s only whitespace becomes empty and fails `missing_field`. Validate locally before sending.'
+  - q: 'Can 422 ever come from a GET endpoint?'
+    a: 'Rarely. A few search endpoints return 422 when the query string is unparseable (e.g., bad qualifier syntax in `/search/issues?q=...`). GitHub mostly reserves 422 for body validation failures on POST/PUT/PATCH.'
+escalate: |
+  Escalate to GitHub support if (a) the `errors` array is empty but the response is 422 — that's a server bug, (b) the validation message references a field your payload doesn't include, or (c) a request that worked yesterday returns 422 today with no schema change announcement on the GitHub Changelog. Otherwise, 422s are nearly always client-side fixes.
+languages:
+  - javascript
+  - python
+  - go
+  - ruby
+keywords:
+  - github 422 validation failed
+  - github api validation error
+  - octokit 422
+  - github already_exists
+  - github missing_field
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+GitHub's 422 means "I understood your request but the data is invalid" — a semantic problem rather than a syntactic one. The response always includes an `errors` array; treating it as the source of truth (rather than the generic top-level `message`) turns 422s from baffling into mechanical.
+
+The most common 422 in practice is uniqueness — `already_exists` for labels, deploy keys, webhook URLs, and one-PR-per-branch-pair. Treating these errors as success in idempotent automation eliminates the majority of 422 noise without changing your logic at all. The remaining cases are missing required fields, which schema validation in your client catches before the round trip.

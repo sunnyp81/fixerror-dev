@@ -1,0 +1,138 @@
+---
+service: anthropic
+code: authentication_error
+slug: authentication-error
+title: "Anthropic Error: authentication_error — Invalid API Key (Cause + Fix)"
+plainTitle: Invalid API Key for Claude API
+httpStatus: 401
+category: auth
+severity: critical
+tldrCause: "The `x-api-key` header you sent doesn't match an active Anthropic API key — usually because the env var isn't loaded, the key was rotated or revoked, you're using a Workspace key in the wrong workspace, or a wrong-provider key (Bedrock or Vertex) was sent to the direct Anthropic API."
+tldrFix: "Confirm the env var loads at runtime, verify the key prefix is `sk-ant-` and the value matches console.anthropic.com → API Keys, check Workspace scope if you have multiple Workspaces, and never reuse Bedrock/Vertex credentials with the direct SDK (they auth differently)."
+contextCode:
+  language: python
+  filename: anthropic_init.py
+  code: |
+    import anthropic
+
+    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=64,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+    except anthropic.AuthenticationError as e:
+        # e.status_code == 401
+        # e.body['error']['type'] == 'authentication_error'
+        # e.body['error']['message'] == 'invalid x-api-key'
+        ...
+  caption: "An `AuthenticationError` is thrown before any inference — Anthropic rejects at the auth layer with HTTP 401 and `type: authentication_error`."
+causes:
+  - title: Environment variable is undefined or empty
+    body: "If `ANTHROPIC_API_KEY` is missing, the SDK sends an empty `x-api-key` header (or fails fast in some versions). Common in Vercel/Netlify when an env was added but the deployment wasn't rebuilt; in Docker without `--env-file`; in Lambda missing the env config."
+  - title: Key was rolled or deleted in the Console
+    body: "If a teammate rolled the key after a leak, every old copy stops working immediately. Anthropic also auto-revokes keys exposed publicly (GitHub scanning). console.anthropic.com → Settings → API Keys shows last-used timestamp and revocation history."
+  - title: Workspace-scoped key used outside its workspace
+    body: "Anthropic supports Workspaces (similar to OpenAI projects). A Workspace API key only authenticates calls scoped to that workspace. Using it against the org-level endpoints, or across workspaces, fails `authentication_error`."
+  - title: Bedrock or Vertex credentials sent to direct Anthropic API
+    body: "AWS Bedrock and GCP Vertex use IAM/AWS-Sig-V4 and OAuth-style auth respectively, not `x-api-key`. Code paths sometimes get crossed — a Bedrock-only credential set is presented to the direct Anthropic SDK and fails 401. Each provider needs its own SDK and credential type."
+  - title: Whitespace, smart quotes, or wrong header in copy-paste
+    body: "Copy-pasting a key from chat or a doc can introduce trailing whitespace, smart quotes, or invisible Unicode. The key prefix is right but the bytes don't match. Some SDKs send the literal string `Bearer sk-ant-...` if you paste a Bearer-style header into a key field; Anthropic expects raw key in `x-api-key`."
+fixes:
+  - title: Print the key prefix and length at startup
+    likelihood: high
+    body: |
+      Never log the full key. Log the prefix (first 12 chars) and length so you can spot truncation, wrong format, or env-var miss without exposing the secret. Add a startup assertion that fails fast on misconfiguration.
+    code:
+      language: python
+      filename: assert_key.py
+      code: |
+        import os, sys
+        key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        if not key:
+            sys.exit("ANTHROPIC_API_KEY is missing")
+        if not key.startswith("sk-ant-"):
+            sys.exit(f"Wrong key prefix: {key[:12]}… (expected sk-ant-)")
+        if len(key) < 90:
+            sys.exit(f"Key looks truncated: length {len(key)}")
+        print(f"Anthropic key OK: prefix={key[:12]}… length={len(key)}")
+  - title: Strip whitespace and quotes before passing to the SDK
+    likelihood: high
+    body: |
+      Bash and `.env` files sometimes pass through quotes or trailing newlines, especially on Windows. Trim aggressively before initialising the client.
+    code:
+      language: javascript
+      filename: trim.js
+      code: |
+        import Anthropic from '@anthropic-ai/sdk';
+
+        const raw = process.env.ANTHROPIC_API_KEY ?? '';
+        const apiKey = raw.trim().replace(/^['"]|['"]$/g, '');
+
+        if (!apiKey.startsWith('sk-ant-')) {
+          throw new Error(`Bad ANTHROPIC_API_KEY prefix: ${apiKey.slice(0, 12)}`);
+        }
+
+        const client = new Anthropic({ apiKey });
+  - title: Verify in the Console that the key is active
+    likelihood: medium
+    body: |
+      console.anthropic.com → Settings → API Keys lists every key with creation date, last-used timestamp, and revocation status. Locate yours by the last 4 characters and confirm it's not "Revoked." If "Last used: Never" but you're sending it, you have a transit problem (header missing, env not loaded). If revoked, generate a new one and rotate it through your deploys.
+  - title: Check workspace scope and switch if needed
+    likelihood: medium
+    body: |
+      In multi-workspace orgs, each workspace has its own keys. Confirm the workspace that owns the key matches the workspace your code is calling against. Workspace-scoped errors usually report `authentication_error` rather than a more specific scope error — Console → Workspaces shows which keys belong where."
+  - title: Use the right SDK for the right provider
+    likelihood: low
+    body: |
+      Direct Anthropic API → `anthropic.Anthropic()` (Python) / `Anthropic` (TypeScript), env `ANTHROPIC_API_KEY`. AWS Bedrock → `boto3` or `@aws-sdk/client-bedrock-runtime`, AWS credentials. GCP Vertex → `google-cloud-aiplatform`, GCP service account. They are not interchangeable. If your codebase supports both, isolate the credential plumbing per provider."
+detection: |
+  Alert on any `AuthenticationError` immediately — they should be near-zero in steady state. A burst usually means a deploy shipped with a wrong env, someone rolled the key, or Anthropic's exposed-key scanner revoked it. Tag the alert with the key prefix's last 4 chars (never the full key) so you can correlate to a specific rotation event.
+related:
+  - rate-limit-error
+  - overloaded-error
+  - api-key-invalid
+  - rate-limit-exceeded
+  - insufficient-quota
+relatedHttp: 401
+relatedGuide: anthropic-environment-setup
+faq:
+  - q: "What's the format of an Anthropic API key?"
+    a: "Keys start with `sk-ant-` followed by ~93 characters of alphanumerics. Older keys may have slightly different formats but the `sk-ant-` prefix has been standard since 2023. If your value doesn't start with that prefix, it's not a direct Anthropic API key — it might be a Bedrock or Vertex credential miscopied into the wrong env var."
+  - q: "Why is the auth header `x-api-key` and not `Authorization: Bearer`?"
+    a: "Anthropic chose a custom header from the start. The SDKs handle this for you — when calling raw HTTP, set `x-api-key: sk-ant-...`. Sending `Authorization: Bearer sk-ant-...` will return `authentication_error` because the `x-api-key` header is missing."
+  - q: "How do I rotate an Anthropic key without downtime?"
+    a: "Generate the new key in console.anthropic.com → Settings → API Keys → Create Key. Deploy the new key to your environment, verify traffic flows, then revoke the old one. Anthropic doesn't currently support overlapping rotation windows the way Stripe does — you have to swap atomically. Coordinating across deploys is the hard part."
+  - q: "Are Anthropic API keys scoped by Workspace?"
+    a: "Yes if you've enabled Workspaces. Each Workspace has its own keys with their own usage/billing tracking. An org-level admin key has broader access. Console → Workspaces shows the relationship. Choose the right scope when generating: most production should use Workspace keys for tighter blast radius."
+  - q: "Will Anthropic auto-revoke keys exposed in public GitHub repos?"
+    a: "Yes. Anthropic participates in GitHub's secret scanning. If a key is pushed to a public repo, it's typically revoked within minutes and you'll see an email. Roll the key, audit logs for unauthorised usage, and add a pre-commit secret scanner (gitleaks, TruffleHog) to your repos."
+  - q: "Why does the Bedrock SDK never throw `authentication_error`?"
+    a: "Bedrock auth uses AWS IAM, not Anthropic API keys. Failures throw `AccessDeniedException` or signature errors from the AWS SDK. Vertex auth uses GCP service accounts and throws GCP-style auth errors. Only the direct Anthropic API uses `x-api-key` and `authentication_error`."
+  - q: "Can a single API key serve multiple environments (dev/staging/prod)?"
+    a: "Technically yes, but you shouldn't. Use separate keys per environment so you can rotate, revoke, or rate-limit one without affecting others. Per-environment keys also give you per-environment usage analytics in the Console."
+  - q: "Does the SDK validate the key format before sending the request?"
+    a: "The latest SDKs (anthropic Python ≥0.30, JS ≥0.30) check that the key is non-empty and may warn on missing prefix, but they don't strictly validate format. The server is the source of truth — invalid keys round-trip and return `authentication_error`."
+escalate: |
+  Open a support ticket only if (a) the Console shows the key as active and last-used recently but every request returns 401, suggesting an account or routing issue on Anthropic's side, (b) Anthropic's auto-revoke flagged a key that wasn't actually exposed, or (c) Workspace permissions are inconsistent with what's configured. For wrong-env, rolled-key, or copy-paste issues, the fix is in your code or hosting environment.
+languages:
+  - python
+  - javascript
+  - go
+  - ruby
+keywords:
+  - anthropic authentication_error
+  - claude 401 unauthorized
+  - claude invalid api key
+  - anthropic x-api-key
+  - claude api auth failed
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`authentication_error` is Anthropic's auth-layer rejection: HTTP 401 with structured error type `authentication_error` and a message like `invalid x-api-key`. The auth check happens before any model invocation, so the error is always about credentials — never about the prompt, the model, or rate limits. If you see it, the bytes you're sending in the `x-api-key` header don't match an active key in Anthropic's registry.
+
+The fix is almost always boring: an env var that didn't load, a key that was rolled, a Workspace mismatch, or whitespace creeping in from a copy-paste. Add a startup assertion that prints the key prefix and length, fail fast if anything's off, and you'll catch 90%+ of these errors before they reach a customer. The remaining 10% are key rotations and Workspace scope changes, both of which the Anthropic Console reveals in seconds.

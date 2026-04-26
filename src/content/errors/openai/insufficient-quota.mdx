@@ -1,0 +1,145 @@
+---
+service: openai
+code: insufficient_quota
+slug: insufficient-quota
+title: "OpenAI Error: insufficient_quota — You Exceeded Your Current Quota (Cause + Fix)"
+plainTitle: You Exceeded Your Current Quota
+httpStatus: 429
+category: billing
+severity: critical
+tldrCause: "Your OpenAI organisation has run out of paid credit, hit its monthly hard limit, or hasn't added a payment method yet. Despite the 429 status, this is a billing problem — not a rate-limit problem — and retrying won't help."
+tldrFix: "Go to platform.openai.com/account/billing, add or top up your payment method, raise your monthly usage limit, then retry. If you're on a free trial that expired, switch to a paid plan."
+contextCode:
+  language: python
+  filename: openai_call.py
+  code: |
+    import openai
+
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+    except openai.RateLimitError as e:
+        # e.status_code == 429
+        # e.code == 'insufficient_quota'
+        # e.type == 'insufficient_quota'
+        # e.message includes 'You exceeded your current quota, please check your plan and billing details.'
+        if e.code == 'insufficient_quota':
+            alert_billing_team()
+            raise  # don't retry
+  caption: "Despite returning HTTP 429, `insufficient_quota` is permanent until billing is fixed — distinguish it from `rate_limit_exceeded` to avoid useless retry storms."
+causes:
+  - title: Free trial credit exhausted or expired
+    body: "New OpenAI accounts get a small amount of free credit ($5 historically, less now) that expires after 3 months. Once spent or expired, every request fails `insufficient_quota` until you add a payment method. The dashboard shows the remaining trial balance under Billing → Overview."
+  - title: Monthly hard usage limit reached
+    body: "Even on paid plans, OpenAI enforces a soft and hard usage cap per month (set in Billing → Limits). Hitting the hard limit blocks all further requests until the next billing cycle or you raise the cap. The default for new paid orgs is often $120/mo — easy to hit on production traffic."
+  - title: Payment method failed and credit isn't auto-topping up
+    body: "OpenAI's auto-recharge depends on a working card. If a charge fails (expired card, decline), auto-recharge stops and your balance drops to zero. The org continues running until the credit hits zero, then every call fails `insufficient_quota` until you fix billing."
+  - title: Org never added a payment method
+    body: "Some teams sign up, get the API key working with trial credit, then forget to add a card. Once trial credit runs out, the API stops cold. Common with side projects that ramp up unexpectedly when they get attention."
+  - title: Project-level spend cap reached (Projects feature)
+    body: "If your org uses Projects, each project can have its own monthly spend cap. Hitting a project cap returns `insufficient_quota` even though the org has plenty of headroom. Look at Settings → Projects → [your project] → Limits."
+fixes:
+  - title: Add or top up your payment method, then raise the usage limit
+    likelihood: high
+    body: |
+      Go to platform.openai.com/account/billing/overview. Add a card if missing. If a card is attached, top up your prepaid balance manually (Billing → Add to credit balance) and enable auto-recharge with a sensible threshold. Then go to Limits and raise your monthly hard cap to a level that won't cut off production.
+  - title: Fail loudly on `insufficient_quota` — never silently retry
+    likelihood: high
+    body: |
+      `insufficient_quota` is a billing problem, not a transient one. Retrying with backoff wastes capacity and floods your logs. Catch the error, page the billing/ops on-call, and stop retrying. Distinguish it explicitly from `rate_limit_exceeded`.
+    code:
+      language: python
+      filename: handle_quota.py
+      code: |
+        import openai
+        from openai import RateLimitError
+
+        def safe_call(messages, model="gpt-4o"):
+            try:
+                return openai.chat.completions.create(model=model, messages=messages)
+            except RateLimitError as e:
+                if e.code == 'insufficient_quota':
+                    # Page billing — do not retry
+                    notify_pagerduty('OpenAI quota exhausted', severity='critical')
+                    raise QuotaExhaustedError() from e
+                # Real rate-limit — retry with backoff handled elsewhere
+                raise
+  - title: Set up balance and usage alerts before you run out
+    likelihood: high
+    body: |
+      In Billing → Limits, set a soft usage limit (warning email) at 70% and a hard limit at 100% of your monthly budget. In Billing → Auto-recharge, set "Recharge when balance drops below" at $20-50 so you never hit zero unexpectedly. Run a daily script that checks the credit balance via the dashboard and alerts before depletion.
+    code:
+      language: python
+      filename: balance_check.py
+      code: |
+        # OpenAI doesn't yet expose balance via API.
+        # Workaround: track your spend client-side from response.usage and alert.
+        from collections import defaultdict
+        spend_today = defaultdict(float)
+
+        PRICE = {"gpt-4o": (2.50/1e6, 10.00/1e6)}  # input, output per token
+
+        def track(response, model):
+            in_p, out_p = PRICE[model]
+            cost = response.usage.prompt_tokens * in_p + response.usage.completion_tokens * out_p
+            spend_today[model] += cost
+            if sum(spend_today.values()) > DAILY_BUDGET:
+                alert("Daily OpenAI budget exceeded")
+  - title: Move to a paid tier if you're still on free trial
+    likelihood: medium
+    body: |
+      Free trial credit isn't designed for production traffic. As soon as the project moves beyond proof-of-concept, add a payment method and start spending real money — that auto-upgrades you from free tier to tier 1 immediately, and to higher tiers after $50+ paid + 7 days. Tiered limits also reduce `rate_limit_exceeded` errors.
+  - title: Check project-level limits if your org uses Projects
+    likelihood: low
+    body: |
+      Settings → Projects → [project] → Limits shows per-project spend caps and rate limits. Hitting a project cap returns `insufficient_quota` even with org headroom. Either raise the project cap or move the workload to a project with available budget.
+detection: |
+  Tag `insufficient_quota` errors distinctly from `rate_limit_exceeded` in your monitoring. The former should fire a critical alert (production is down), the latter is informational. A single `insufficient_quota` error means every subsequent call will also fail — don't dedupe to a single alert per hour, page immediately. Track daily token spend client-side from `response.usage` since OpenAI doesn't expose live balance via API.
+related:
+  - rate-limit-exceeded
+  - context-length-exceeded
+  - model-not-found
+  - rate-limit-error
+  - authentication-error
+relatedHttp: 429
+relatedGuide: handling-rate-limits
+faq:
+  - q: "Why is `insufficient_quota` returned as HTTP 429 when it's a billing problem?"
+    a: "OpenAI uses 429 for any 'cannot proceed because of usage policy' response — both rate-limits (transient) and quota exhaustion (permanent until billing fixed). Always read the `code` field on the error: `rate_limit_exceeded` is retryable with backoff, `insufficient_quota` is not."
+  - q: "How do I tell `insufficient_quota` from `rate_limit_exceeded` in code?"
+    a: "Both are `openai.RateLimitError` (Python) or `OpenAI.RateLimitError` (Node). Inspect `error.code` (or `error.body.error.code`): `'insufficient_quota'` vs `'rate_limit_exceeded'`. Branch your retry logic on that — only retry the latter."
+  - q: "Will OpenAI grant emergency credit if production is down?"
+    a: "No. There's no emergency credit programme. The fastest path is to add or top up your payment method via the dashboard — it processes within minutes. If your card is failing, switch to a different card or wire transfer (enterprise only)."
+  - q: "My org has $500 of credit but I still get `insufficient_quota`. What's wrong?"
+    a: "Usually a project-level cap. Check Settings → Projects → [project] → Limits — your project may have a $0 cap even though the org has credit. Raise the project cap. Less commonly, your monthly hard limit is set lower than your credit balance."
+  - q: "Does OpenAI auto-recharge after a card failure?"
+    a: "It tries once, then disables auto-recharge until you reattach a working card or click 'Try again' in the Billing UI. Until then, the org continues consuming pre-paid balance until it hits zero, then fails `insufficient_quota`."
+  - q: "If I raise my monthly limit mid-month, do I get charged immediately?"
+    a: "No. Raising the limit just allows more usage; you're billed as you consume. The new limit takes effect immediately — refresh the dashboard to confirm."
+  - q: "Can I see how much credit I have left from the API?"
+    a: "Not directly — there's no balance endpoint as of late 2025. Track spend client-side from `response.usage` and the published price-per-token, or scrape the dashboard via the unauthenticated `dashboard/billing/credit_grants` endpoint (which works only with session cookies, not API keys)."
+  - q: "Is `insufficient_quota` ever transient?"
+    a: "Only if auto-recharge is enabled and a top-up settles seconds after the error. Otherwise treat it as terminal. Retrying without a billing change burns capacity, fills logs, and could mask the real outage."
+escalate: |
+  Open a billing support ticket only if (a) you've added a payment method, the dashboard shows positive credit, and you still get `insufficient_quota`, or (b) auto-recharge has stopped working despite a valid card. For 'I want a higher limit' or 'my trial ran out', the answer is in the Billing UI — support can't shortcut it. For paid enterprise contracts, your account manager can adjust limits faster.
+languages:
+  - python
+  - javascript
+  - go
+  - ruby
+keywords:
+  - openai insufficient_quota
+  - openai 429 quota
+  - openai exceeded quota
+  - openai billing error
+  - openai out of credit
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`insufficient_quota` is OpenAI's billing-out signal dressed up as HTTP 429. Unlike `rate_limit_exceeded` (which means "slow down"), `insufficient_quota` means "you've run out of money, retrying won't help, fix billing." The two errors share a status code but require completely different handling — and conflating them is one of the most common bugs in production OpenAI integrations.
+
+The fix is rarely in code. It's in your billing setup: a card on file, auto-recharge enabled, soft/hard limits set high enough for production, and an alerting system that pages you when balance drops. Get those right and you'll never see `insufficient_quota` outside a deliberate spend cap. Get them wrong and you'll have a silent outage every time the prepaid balance ticks to zero.

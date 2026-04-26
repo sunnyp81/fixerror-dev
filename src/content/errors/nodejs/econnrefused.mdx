@@ -1,0 +1,175 @@
+---
+service: nodejs
+code: ECONNREFUSED
+slug: econnrefused
+title: "Node.js Error: ECONNREFUSED — TCP Connection Refused (Cause + Fix)"
+plainTitle: Connection Refused
+category: network
+severity: high
+tldrCause: Node.js asked the OS to open a TCP connection to a host:port and the OS got an explicit RST back from the target — nothing is listening on that port, or a firewall actively rejected it. Unlike ETIMEDOUT, this fails fast.
+tldrFix: "Confirm the target service is up (`curl -v <host>:<port>` or `nc -zv <host> <port>`), the host/port your code uses match what the service is bound to (especially inside Docker — `localhost` ≠ host machine), and no firewall/security group is dropping the connection."
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    Error: connect ECONNREFUSED 127.0.0.1:6379
+        at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1607:16)
+        at TCPConnectWrap.callbackTrampoline (node:internal/async_hooks:130:17) {
+      errno: -111,
+      code: 'ECONNREFUSED',
+      syscall: 'connect',
+      address: '127.0.0.1',
+      port: 6379
+    }
+  caption: The `address` and `port` fields are exactly what Node tried to connect to — start your debugging from those two values.
+causes:
+  - title: Target service isn't running
+    body: "The most common cause locally — Redis/Postgres/the API/whatever you're calling isn't started. Production: a sidecar container exited, a systemd unit failed, an upstream's deploy is mid-rollout with no warm pods."
+  - title: Wrong host inside Docker / Docker Compose
+    body: "Inside a container, `localhost` (or `127.0.0.1`) means the container itself, not your host machine or another container. Use the compose service name (`redis`, `db`, `api`) as the hostname, or `host.docker.internal` on Docker Desktop to reach the host."
+  - title: Service is bound to a different interface
+    body: "A service running on `127.0.0.1:6379` accepts only loopback connections — code on the same machine works, code on another host or in another container fails. Check the service's bind address (Redis: `bind`, Postgres: `listen_addresses`, your own app: which interface you pass to `listen`)."
+  - title: Firewall, security group, or NACL blocking
+    body: "Cloud providers default to deny-all on private subnets. Your AWS RDS / GCP Cloud SQL / Azure Database is up but its security group / firewall rule doesn't include the source IP or security group. Connecting from outside the VPC needs explicit ingress."
+  - title: Port collision or wrong port number
+    body: "Two processes trying to bind the same port → the second one fails (often EADDRINUSE), and your client points at the unresponsive one. Or a typo: `:3000` instead of `:3001`. Always print the resolved DSN at startup."
+fixes:
+  - title: Verify the target with curl, nc, or telnet from the same origin
+    likelihood: high
+    body: |
+      Reproduce the failure outside Node first — it confirms whether the issue is network/host or in your application code. Run the check from the exact origin (your laptop, the container, the EC2 instance) that Node is running from.
+    code:
+      language: bash
+      filename: probe.sh
+      code: |
+        # Fast TCP probe — works on Linux, Mac, most cloud images.
+        nc -zv example.com 6379
+        # Connection to example.com 6379 port [tcp/redis] succeeded!  ← good
+        # nc: connect to example.com port 6379 (tcp) failed: Connection refused
+
+        # If nc isn't available:
+        curl -v telnet://example.com:6379
+
+        # Inside a Docker container:
+        docker exec -it <container> sh -c 'nc -zv redis 6379'
+  - title: Add a retry-with-backoff for transient ECONNREFUSED
+    likelihood: high
+    body: |
+      In production, services restart, scale, and fail over — ECONNREFUSED can be transient during rolling deploys. Wrap connection attempts in a bounded retry with exponential backoff and jitter. Don't retry forever; surface the error after ~30s so monitoring sees it.
+    code:
+      language: typescript
+      filename: connectWithRetry.ts
+      code: |
+        export async function connectWithRetry<T>(
+          attempt: () => Promise<T>,
+          { maxAttempts = 6, baseDelayMs = 250 } = {},
+        ): Promise<T> {
+          let lastErr: unknown;
+          for (let i = 0; i < maxAttempts; i++) {
+            try {
+              return await attempt();
+            } catch (err: any) {
+              if (err?.code !== 'ECONNREFUSED') throw err;
+              lastErr = err;
+              const backoff = baseDelayMs * 2 ** i;
+              const jitter = Math.random() * backoff * 0.25;
+              await new Promise((r) => setTimeout(r, backoff + jitter));
+            }
+          }
+          throw lastErr;
+        }
+  - title: Fix the Docker host
+    likelihood: high
+    body: |
+      Inside Docker Compose, services reach each other by service name on the compose network. Inside a single container that needs to reach the host, use `host.docker.internal` on Docker Desktop, or run with `--add-host=host.docker.internal:host-gateway` on Linux.
+    code:
+      language: yaml
+      filename: docker-compose.yml
+      code: |
+        services:
+          api:
+            build: .
+            environment:
+              REDIS_URL: redis://redis:6379    # service name, NOT localhost
+              DATABASE_URL: postgres://db/app
+            depends_on:
+              redis:
+                condition: service_healthy
+              db:
+                condition: service_healthy
+
+          redis:
+            image: redis:7
+            healthcheck:
+              test: [CMD, redis-cli, ping]
+              interval: 1s
+
+          db:
+            image: postgres:16
+            healthcheck:
+              test: [CMD-SHELL, "pg_isready -U postgres"]
+  - title: Open the firewall / security group on the right port
+    likelihood: medium
+    body: |
+      AWS: edit the target's security group → inbound rules → add TCP port from the source's security group ID (not its IP — IPs change). GCP: VPC firewall rules. Linux: `sudo ufw allow from <ip> to any port <port>`. Always allow from the smallest possible source, never `0.0.0.0/0` for databases.
+  - title: Print the actual host:port your code resolved to
+    likelihood: low
+    body: |
+      Misconfigured env vars cause a surprising share of ECONNREFUSED reports. Log the resolved connection target at startup (with secrets redacted) so the next debugger doesn't have to guess.
+    code:
+      language: typescript
+      filename: redis.ts
+      code: |
+        import { createClient } from 'redis';
+
+        const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
+        console.log('redis target:', new URL(url).host);
+
+        const client = createClient({ url });
+        client.on('error', (err) => console.error('redis error', err));
+        await client.connect();
+detection: |
+  Differentiate "service is down" from "this one instance can't reach the service" in your monitoring. Tag ECONNREFUSED logs with the source instance ID and the target host:port. If 1 instance fails while 99 succeed, that instance has a network issue (bad SG, bad route). If all 100 instances fail simultaneously, the target is down. The latter is much more urgent. Track ECONNREFUSED rate per target as a gauge, not just a count.
+related:
+  - eaddrinuse-nodejs
+  - err-require-esm-nodejs
+  - heap-out-of-memory-nodejs
+  - econnrefused-postgres
+  - function-invocation-timeout-nextjs
+relatedGuide: nodejs-network-debugging
+faq:
+  - q: What's the difference between ECONNREFUSED and ETIMEDOUT?
+    a: "ECONNREFUSED = the host actively replied with TCP RST — nothing is listening on the port, or a firewall is set to reject (not drop). Fails in milliseconds. ETIMEDOUT = no reply at all — host unreachable, firewall silently dropping packets, or the target is so overloaded it never responds. ETIMEDOUT takes the OS connect timeout (~75s on Linux). ECONNREFUSED is more diagnostic; ETIMEDOUT is more often a network-path issue."
+  - q: Why do I get ECONNREFUSED inside Docker but localhost works on my machine?
+    a: "Inside a container, `localhost` (or `127.0.0.1`) refers to the container's own network namespace, not your host machine. Use the compose service name as the host (e.g., `redis://redis:6379`), use `host.docker.internal` on Docker Desktop, or pass `--network host` on Linux to share the host's network namespace."
+  - q: Should I retry on ECONNREFUSED?
+    a: "Yes, but bounded — exponential backoff with jitter, capped at ~30 seconds total. ECONNREFUSED is often transient during rolling deploys, container restarts, or autoscaling events. Retrying forever masks real outages from your monitoring, so always surface the error after the retry budget is exhausted."
+  - q: My service is running and curl works, but Node still gets ECONNREFUSED.
+    a: "Three checks: (1) is curl resolving the same hostname Node is? Add `console.log` to print the env var value Node actually saw. (2) is your service IPv6-only? Node may be trying IPv4 (`127.0.0.1`) while the service binds `::1`. Try connecting to `localhost` and let Node resolve it. (3) is there a hosts file override or VPN-injected DNS that affects only Node's resolver?"
+  - q: How is Node's ECONNREFUSED different from the same error in Postgres or Redis clients?
+    a: "It's the same OS-level error — Node's `net` module surfaces `ECONNREFUSED` from the libuv layer, and database/Redis clients usually re-throw it unchanged. The difference is in client retry semantics: `pg.Pool` will retry on connect failure; raw `net.connect()` won't. Always read the wrapping client's docs to know what it does on connection failure."
+  - q: Can a connection pool cause ECONNREFUSED?
+    a: "Pools themselves don't cause it — they cause ETIMEDOUT (waiting too long for a free connection) or pool-exhaustion errors. But pools sitting in front of a database (PgBouncer, RDS Proxy) can refuse new TCP connections when their own pool is saturated, which surfaces as ECONNREFUSED to your app. Check the pool's metrics first."
+  - q: Why does ECONNREFUSED only happen from production, not from my laptop?
+    a: "Almost always a network-policy difference. Your laptop is outside the production VPC and may be on an allowlist; your production app is inside the VPC and uses a security group / NACL that's missing a rule. Or your laptop hits a public load balancer while production hits a private one. Reproduce by running `nc -zv <target>` from inside the production environment."
+  - q: Does Node retry ECONNREFUSED automatically?
+    a: "No. Node's `net.connect()` fails immediately on ECONNREFUSED. Higher-level clients (most database drivers, Redis clients, fetch in some configs) implement their own retries. If you want retries on raw sockets, you implement them yourself with a backoff loop."
+escalate: |
+  Escalate to network/infra when (a) `nc` from the same origin succeeds but Node fails, (b) the target is healthy in monitoring but multiple sources can't reach it, or (c) ECONNREFUSED rate spikes correlate with platform events (autoscaling, AZ failover) — that's an infrastructure issue, not application code. For managed services (RDS, ElastiCache, Cloud SQL): open a provider ticket with your instance ID, source IP/SG, and a packet capture if available.
+languages:
+  - typescript
+  - javascript
+keywords:
+  - nodejs econnrefused
+  - node connection refused
+  - econnrefused docker
+  - node tcp refused
+  - econnrefused redis
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`ECONNREFUSED` in Node isn't a Node-specific error — it's an OS-level signal that your TCP connect attempt was actively rejected by the target. The kernel asked, the target said no. That's different from ETIMEDOUT (no answer) and EHOSTUNREACH (no route). ECONNREFUSED fails in milliseconds, which is good news for debugging: you can iterate fast.
+
+The fix is almost always one of: the service isn't running, the host you specified isn't reachable from where you specified it (especially inside Docker), or a firewall is in the way. Reproduce with `nc -zv` from the same origin first, then look at config.

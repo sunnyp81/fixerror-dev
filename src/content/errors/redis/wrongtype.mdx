@@ -1,0 +1,148 @@
+---
+service: redis
+code: WRONGTYPE
+slug: wrongtype
+title: 'Redis Error: WRONGTYPE — Operation Against Wrong Key Type (Cause + Fix)'
+plainTitle: Wrong Key Type
+category: database
+severity: medium
+tldrCause: You ran a Redis command that only works on a specific data type (e.g., `LPUSH` on lists) against a key that holds a different type (e.g., a string). Each Redis key has exactly one type — set when first written — and commands are type-specific.
+tldrFix: Check the key's type with `TYPE <key>` before mixing operations, namespace keys by data type (`user:123:tags` vs `user:123:json`), and prefer atomic type-changing patterns like `DEL + SET` or `RENAME` instead of overwriting in place.
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    127.0.0.1:6379> SET user:42 '{"name":"Alice"}'
+    OK
+    127.0.0.1:6379> LPUSH user:42 'role:admin'
+    (error) WRONGTYPE Operation against a key holding the wrong kind of value
+  caption: "Redis pins a key's type on first write. LPUSH against a string key fails forever until DEL."
+causes:
+  - title: Two code paths writing different types to the same key
+    body: "One service writes a JSON string with `SET user:42 '{...}'`; another tries to push a tag with `LPUSH user:42 ...`. Both look correct in isolation but collide at runtime. WRONGTYPE is the symptom of an unmapped namespace boundary."
+  - title: Migration left old-typed keys behind
+    body: "You changed the schema from `SET user:42:tags 'admin,beta'` to `SADD user:42:tags admin beta` but didn't run the migration. New code hits old keys and fires WRONGTYPE on every read."
+  - title: Cache key clash with another feature
+    body: "Two unrelated features chose the same key prefix (`session:abc`). One uses HSET (hash), the other GET (string). Neither team realises until a customer hits both code paths in the same session."
+  - title: SET overwriting a complex type's key
+    body: "If a feature writes `SET key value` to a key that previously held a list/hash/set, Redis allows the SET (it replaces the value entirely with a string). Subsequent commands against the old type fail. Sometimes the bug is that SET *succeeded* — the destruction is silent."
+  - title: TTL-zero key returning unexpectedly
+    body: "A key that expired and was rewritten by the wrong code path may now have a different type than your reader expects. Cache stampedes after TTL expiry are a common WRONGTYPE source."
+fixes:
+  - title: Check the key''s type before mixing operations
+    likelihood: high
+    body: |
+      Use `TYPE <key>` (returns `none`, `string`, `list`, `set`, `zset`, `hash`, `stream`) and branch your code defensively. Better yet, namespace keys so types are obvious from the name.
+    code:
+      language: javascript
+      filename: typed.js
+      code: |
+        import { createClient } from 'redis';
+        const redis = createClient();
+        await redis.connect();
+
+        async function appendTag(userId, tag) {
+          const key = `user:${userId}:tags`;     // type-suffixed
+          const type = await redis.type(key);
+          if (type !== 'set' && type !== 'none') {
+            throw new Error(`Expected set at ${key}, got ${type}`);
+          }
+          await redis.sAdd(key, tag);
+        }
+  - title: Namespace keys by type explicitly
+    likelihood: high
+    body: |
+      `user:42:profile` for the JSON string, `user:42:tags` for the set, `user:42:counters` for the hash. The key name contains the data shape; new contributors can't accidentally mix operations.
+  - title: Use a Lua script to overwrite a key atomically
+    likelihood: medium
+    body: |
+      To replace a key's type without a race, run `DEL` and the new write in a single Lua script. EVAL is atomic in Redis, so no other client can observe the intermediate empty state.
+    code:
+      language: text
+      filename: replace.lua
+      code: |
+        -- KEYS[1] = key, ARGV = elements to SADD
+        redis.call('DEL', KEYS[1])
+        for i = 1, #ARGV do
+          redis.call('SADD', KEYS[1], ARGV[i])
+        end
+        return #ARGV
+  - title: Catch WRONGTYPE in code as a domain signal
+    likelihood: medium
+    body: |
+      For migration code, treat WRONGTYPE as "old-format key, run the convertor." For application code, surface it loudly — WRONGTYPE in steady state is a bug, not a transient.
+    code:
+      language: python
+      filename: convert.py
+      code: |
+        import redis
+
+        r = redis.Redis()
+
+        def get_tags(user_id):
+            key = f"user:{user_id}:tags"
+            try:
+                return r.smembers(key)
+            except redis.exceptions.ResponseError as e:
+                if 'WRONGTYPE' not in str(e):
+                    raise
+                # Old format: comma-separated string. Migrate.
+                raw = r.get(key)
+                tags = set(raw.decode().split(',')) if raw else set()
+                pipe = r.pipeline()
+                pipe.delete(key)
+                if tags:
+                    pipe.sadd(key, *tags)
+                pipe.execute()
+                return tags
+  - title: Audit your codebase for shared key prefixes
+    likelihood: low
+    body: |
+      `grep -r "redis.*\"user:"` (and similar) across services. Any prefix used by multiple commands of different types is a future WRONGTYPE waiting to fire. Promote shared prefixes to constants in a single shared config file.
+detection: |
+  Surface WRONGTYPE as its own metric — it's almost always a bug, never a transient. A single occurrence in production warrants investigation. Tag by key prefix in your error tracker so you see clusters around specific features. Redis Slowlog and `MONITOR` can capture the offending command sequence during incidents.
+related:
+  - oom-redis
+  - readonly-redis
+  - busy-redis-script
+  - 23505-unique-violation-postgres
+  - max-clients-redis
+relatedGuide: redis-error-codes
+faq:
+  - q: 'Why doesn''t Redis just convert types automatically?'
+    a: 'Each Redis type has different runtime semantics — strings are atomic, lists support push/pop, hashes have field-level access. Auto-conversion would silently destroy data (a list with one element becoming a string of comma-separated values has different access patterns). Failing fast with WRONGTYPE is the safer default.'
+  - q: 'How do I see what type a key currently is?'
+    a: '`TYPE <key>` returns the type as a string: `none` (no key), `string`, `list`, `set`, `zset`, `hash`, `stream`. The redis-cli `OBJECT ENCODING <key>` adds the internal encoding (e.g., `listpack`, `hashtable`) which can affect performance characteristics.'
+  - q: 'Can SET overwrite a list or hash?'
+    a: 'Yes — silently. SET on any existing key, regardless of original type, replaces the value with a string. This is intentional (SET is the fundamental write) but it means a buggy code path can wipe a list/hash without error. Catch this in code review with type-checking helpers or namespaced keys.'
+  - q: 'Should I retry on WRONGTYPE?'
+    a: 'No. WRONGTYPE is deterministic — the key type is wrong now and will be wrong on retry. Retrying just delays the bug surfacing. Either the key needs migration, the namespace needs splitting, or two services need to coordinate on key ownership.'
+  - q: 'Does Redis Cluster make WRONGTYPE more likely?'
+    a: 'Not directly — keys still have one type each, regardless of which slot/node they live on. But cross-team, cross-service deployments on a shared cluster make accidental key collisions more likely than on a small single-tenant Redis.'
+  - q: 'Will EXPIRE on a WRONGTYPE key fail?'
+    a: 'No. TTL-related commands (EXPIRE, PERSIST, TTL) work on all types. WRONGTYPE only fires for commands that read or write the value in a type-specific way (LPUSH, SADD, HGET, etc.).'
+  - q: 'How do I prevent WRONGTYPE in a multi-service setup?'
+    a: 'Establish a key registry — a shared doc or generated TypeScript types listing every key prefix, its owner service, and its expected type. Enforce in code review. For larger setups, run a periodic audit script that samples keys with `SCAN` and reports any prefix used with mixed types.'
+  - q: 'Can a Lua script return WRONGTYPE?'
+    a: 'Yes — `redis.call()` from Lua propagates errors including WRONGTYPE. Use `redis.pcall()` if you want to catch and handle the error inside the script (e.g., to fall back to a different type-specific command path).'
+escalate: |
+  No vendor escalation needed for WRONGTYPE — it's purely a code-side issue. If you see WRONGTYPE on a key your service is the sole writer of, audit deploys around the failure timestamp; usually a recently-deployed code path is mis-using the key. Snapshot the key with `DEBUG OBJECT <key>` for forensic detail before deleting and re-creating.
+languages:
+  - javascript
+  - python
+  - go
+  - ruby
+keywords:
+  - redis wrongtype
+  - redis wrong key type
+  - redis operation against wrong kind of value
+  - redis type error
+  - redis type command
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`WRONGTYPE` is Redis telling you "this key holds a different data type than the command expects." Each Redis key is locked to a single type from its first write until it's deleted. Mixing operations across types — or worse, two code paths writing different types to the same key — is the only way WRONGTYPE happens.
+
+The single most effective preventive habit is type-suffixed key naming: `user:42:profile` (string), `user:42:tags` (set), `user:42:counters` (hash). The key name encodes the shape, the shape is visible at every read site, and accidental cross-type usage becomes a code-review issue rather than a runtime bug. Combined with a small `TYPE` check at sensitive call sites, you can eliminate WRONGTYPE almost entirely.

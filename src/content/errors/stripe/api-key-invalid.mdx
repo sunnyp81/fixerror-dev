@@ -1,0 +1,131 @@
+---
+service: stripe
+code: api_key_invalid
+slug: api-key-invalid
+title: "Stripe Error: api_key_invalid — Invalid API Key Provided (Cause + Fix)"
+plainTitle: Invalid API Key Provided
+httpStatus: 401
+category: auth
+severity: critical
+tldrCause: "The API key you sent in the `Authorization: Bearer ...` header doesn't match any active Stripe key — usually because of a test/live mode mismatch, a deleted or rolled key, copy-paste corruption, or a missing environment variable falling through to `undefined`."
+tldrFix: "Confirm the key prefix matches the mode you intend (`sk_test_` for test, `sk_live_` for live), check it hasn't been rolled or deleted in Dashboard → Developers → API keys, verify the env var actually loads at runtime, and never check secret keys into git."
+contextCode:
+  language: javascript
+  filename: stripe-init.js
+  code: |
+    import Stripe from 'stripe';
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+    try {
+      await stripe.customers.list({ limit: 1 });
+    } catch (err) {
+      // err.type === 'StripeAuthenticationError'
+      // err.code === undefined (auth errors don't have a `code` field)
+      // err.statusCode === 401
+      // err.message === 'Invalid API Key provided: sk_test_***...***'
+    }
+  caption: "A `StripeAuthenticationError` is thrown before any business logic runs — Stripe rejects at the auth layer with HTTP 401."
+causes:
+  - title: Test key used in live mode (or vice versa)
+    body: "Stripe has two parallel environments. `sk_test_*` keys only access test data; `sk_live_*` keys only access live data. Pointing a test key at live API endpoints (or live key at the test dashboard's data) returns `Invalid API Key`. The keys themselves are valid — they're just for the wrong mode."
+  - title: Environment variable is undefined or empty
+    body: "If `process.env.STRIPE_SECRET_KEY` is undefined, the SDK sends the literal string `undefined` (or `null`/empty) as the bearer token. Common in Vercel/Netlify when the env var was added but the deployment wasn't rebuilt, or in Docker when `--env-file` wasn't passed."
+  - title: Key was rolled or deleted in the Dashboard
+    body: "If a teammate rolled the key after a leak, your old copy stops working immediately. Stripe may also retire restricted keys with overly broad scopes during their security audits. Dashboard → Developers → API keys shows last-used timestamp and revocation history."
+  - title: Whitespace, newline, or quote characters in the key
+    body: "Copy-pasting from a Slack message, terminal, or env file can introduce trailing whitespace or smart quotes. The key looks right but has invisible bytes the API rejects. `.env` files quoted with `STRIPE_SECRET_KEY=\"sk_live_...\"` sometimes pass the literal quotes through, especially on Windows."
+  - title: Restricted key missing the required permission
+    body: "Restricted keys (`rk_test_*` / `rk_live_*`) are scoped. If the operation you're calling needs a permission the key wasn't granted (e.g., creating a charge with a key that only has read access), Stripe returns `api_key_invalid` rather than a permission-specific error."
+fixes:
+  - title: Confirm the key matches the intended mode
+    likelihood: high
+    body: |
+      Print the key prefix at startup (never the whole key) and assert it matches the environment. Test deploys must use `sk_test_*`; production must use `sk_live_*`. A simple boot-time check catches misconfiguration before any customer hits the broken state.
+    code:
+      language: javascript
+      filename: assertKeyMode.js
+      code: |
+        const key = process.env.STRIPE_SECRET_KEY;
+        if (!key) throw new Error('STRIPE_SECRET_KEY is missing');
+        const expected = process.env.NODE_ENV === 'production' ? 'sk_live_' : 'sk_test_';
+        if (!key.startsWith(expected)) {
+          throw new Error(
+            `STRIPE_SECRET_KEY mode mismatch: expected ${expected}, got ${key.slice(0, 8)}…`
+          );
+        }
+  - title: Trim whitespace and verify env loading
+    likelihood: high
+    body: |
+      Strip whitespace before passing to the SDK and log the key length (a real key is 107 chars including the prefix). A length mismatch immediately reveals truncation.
+    code:
+      language: javascript
+      filename: trim.js
+      code: |
+        const raw = process.env.STRIPE_SECRET_KEY;
+        const key = raw?.trim().replace(/^['"]|['"]$/g, '');
+        console.log('Stripe key length:', key?.length, 'prefix:', key?.slice(0, 8));
+        if (!key || key.length < 100) {
+          throw new Error('STRIPE_SECRET_KEY looks malformed');
+        }
+        const stripe = new Stripe(key);
+  - title: Check the key wasn't rolled or deleted
+    likelihood: medium
+    body: |
+      Open Dashboard → Developers → API keys, locate your key by its last 4 chars, and check the "Last used" column. If "Never" or a date before now, the key has been replaced. Roll a new one in the same mode and update your env var. Audit the deletion log to find out who rolled it and why.
+  - title: Use a restricted key with the right permissions, or fall back to the secret key
+    likelihood: medium
+    body: |
+      For services that only need a subset of Stripe (e.g., a webhook handler that only reads events), generate a restricted key with the minimum needed permissions. If the restricted key returns `api_key_invalid` on a specific operation, check the permission grid in the Dashboard — adding the missing scope fixes it. Don't fall back to a secret key in production code as a workaround.
+  - title: Rotate keys safely with overlapping windows
+    likelihood: low
+    body: |
+      When rolling a leaked or expiring key, Stripe lets you generate the replacement and keep both active for an overlap window. Deploy the new key first, monitor that traffic flows, then revoke the old one. Skipping the overlap causes brief `api_key_invalid` storms while deploys propagate.
+detection: |
+  Alert on any `StripeAuthenticationError` immediately — they should be near-zero in steady state. A sudden burst means a deploy shipped with the wrong env or someone rolled the key. Tag errors by `process.env.NODE_ENV` and the key prefix (first 8 chars) so you can tell mode mismatches from key revocations at a glance.
+related:
+  - card-declined
+  - insufficient-funds
+  - authentication-required
+  - signature-verification-failed
+  - rate-limit-exceeded
+relatedHttp: 401
+relatedGuide: stripe-environment-setup
+faq:
+  - q: "What's the difference between `Invalid API Key` and `Permission denied`?"
+    a: "`Invalid API Key` (api_key_invalid, 401) means the key isn't recognised at all — wrong mode, deleted, or malformed. `Permission denied` (permission_error, 403) means the key is valid but lacks scope for the operation. The fix differs: regenerate vs grant additional permissions on a restricted key."
+  - q: "Why does my key work locally but fail in production?"
+    a: "Almost always an env var issue. Local `.env` files are loaded by `dotenv`; production needs the variable set in the host's environment (Vercel, Heroku, Render, AWS Parameter Store). Print the key prefix and length at production startup to verify it loaded."
+  - q: "Can a publishable key (`pk_*`) be used server-side?"
+    a: "No. Publishable keys (`pk_test_*`, `pk_live_*`) are read-only client-side keys for Stripe.js. Using one server-side returns `api_key_invalid` for any write operation. Server-side code needs a secret (`sk_*`) or restricted (`rk_*`) key."
+  - q: "Why is `api_key_invalid` thrown as `StripeAuthenticationError` and not `StripeInvalidRequestError`?"
+    a: "Stripe distinguishes auth failures (key issues) from request validation failures (bad params). `StripeAuthenticationError` always means the API key didn't authenticate — restart the auth path. `StripeInvalidRequestError` means the auth was fine but the request body was wrong."
+  - q: "Should I commit my Stripe key to git in a `.env.example`?"
+    a: "Never commit a real key. `.env.example` should contain `STRIPE_SECRET_KEY=sk_test_REPLACE_ME`. If you accidentally committed a real key (even in test mode), roll it immediately in the Dashboard — Stripe also auto-detects exposed keys on GitHub and may roll them for you."
+  - q: "How do I rotate a Stripe key without downtime?"
+    a: "Generate the new key in Dashboard → Developers → API keys → Roll. Stripe lets you keep the old key valid for a chosen overlap (1 hour to 7 days). Deploy the new key, verify traffic, then revoke the old one. Skipping the overlap causes 401 storms during the deploy window."
+  - q: "Why do I see `api_key_invalid` on Stripe's webhook deliveries?"
+    a: "You shouldn't — webhooks don't use your API key, they use the endpoint signing secret (`whsec_*`). If you're calling Stripe's API *from inside* your webhook handler with a stale key, you'll get `api_key_invalid` there. Check the env in your webhook runtime separately from your main app."
+  - q: "Can I scope an API key to specific endpoints or IPs?"
+    a: "Restricted keys can be scoped per-resource (read/write granularity per object type). IP allow-listing is in beta — see Dashboard → Developers → API keys → Restrict by IP. Combine with restricted keys for defence in depth."
+escalate: |
+  Stripe support is the right channel only if (a) the Dashboard shows the key as active but every request fails 401 from your environment, suggesting an account-level or regional Stripe-side issue, or (b) you suspect the key was rolled by Stripe's auto-detect-exposed-keys system without notification. For everything else (mode mismatch, env var missing, copy-paste error, deleted key), the fix is in your code or your hosting environment.
+languages:
+  - javascript
+  - python
+  - ruby
+  - php
+  - go
+keywords:
+  - stripe api_key_invalid
+  - stripe invalid api key
+  - stripe 401 unauthorized
+  - stripe authentication error
+  - stripe sk_live sk_test mismatch
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`api_key_invalid` is Stripe's authentication-layer rejection. Before your request reaches any business logic, Stripe checks the bearer token against its key registry; if it doesn't find a live record, the response is HTTP 401 and your SDK throws `StripeAuthenticationError`. The error has nothing to do with payments, customers, or your account — it's purely about whether the credentials you presented are valid.
+
+The fix is almost always boring: a test key in production, an env var that didn't load, or a rolled key whose replacement never reached the deploy. Add a startup assertion that prints the key prefix and length, and you'll catch 95% of these before they reach a customer. The other 5% are rotations and revocations that Dashboard → Developers → API keys reveals in seconds.

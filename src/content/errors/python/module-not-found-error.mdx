@@ -1,0 +1,157 @@
+---
+service: python
+code: ModuleNotFoundError
+slug: module-not-found-error
+title: "Python Error: ModuleNotFoundError — No module named X (Cause + Fix)"
+plainTitle: No Module Named
+category: config
+severity: high
+tldrCause: "The Python interpreter walked `sys.path` and couldn't find the module you imported. Most common cause: you installed the package in a different environment (different venv, different Python version, system pip vs project pip) than the one running your code."
+tldrFix: "Confirm you're running the right Python (`which python` / `python -c 'import sys; print(sys.executable)'`), install into that exact interpreter (`python -m pip install <pkg>`, not bare `pip install`), and check `python -c 'import sys; print(sys.path)'` shows your project root."
+contextCode:
+  language: text
+  filename: traceback
+  code: |
+    Traceback (most recent call last):
+      File "/Users/dev/project/app.py", line 3, in <module>
+        import requests
+    ModuleNotFoundError: No module named 'requests'
+  caption: Python tells you the file, the line, and the exact module name. The module name is what you pip-install; the path tells you which interpreter ran.
+causes:
+  - title: Wrong virtualenv (or no venv at all)
+    body: "You activated a venv, then opened a new shell that didn't inherit it. Or your IDE runs the system Python while your terminal uses the project's venv. `pip install requests` went to one Python; `python app.py` ran a different one."
+  - title: pip vs python version mismatch
+    body: "You ran `pip install` (which points to one Python, often the system one) but invoked `python3` (a different one). On macOS especially, `python` may be 3.9 (Apple-shipped) and `python3` may be 3.11 (Homebrew). The fix is `python -m pip install <pkg>` — that always uses the same Python."
+  - title: Project not installed editably / wrong PYTHONPATH
+    body: "Your imports use `from myapp.utils import …` but `myapp` is your local code, not on sys.path. Either the project isn't `pip install -e .`'d, or you're running from a directory that doesn't have `myapp` as a subfolder."
+  - title: Missing __init__.py in a package directory
+    body: "In Python 3.3+ namespace packages don't need `__init__.py`, but mixing namespace and regular packages, or having a stray empty directory, breaks imports. If `myapp/utils.py` works but `from myapp.utils import x` doesn't, look for missing `__init__.py`."
+  - title: Module installed but for a different Python or platform
+    body: "You're inside Docker / a container with a different Python build (alpine vs slim, 3.10 vs 3.12) than your host. The host has `requests` installed; the container doesn't. Or you copied `site-packages` between architectures and binary wheels (numpy, pandas) don't load."
+fixes:
+  - title: Install with `python -m pip` so install and run use the same interpreter
+    likelihood: high
+    body: |
+      Bare `pip install` uses whichever pip is first on PATH — often not the one matched to the Python you'll run. `python -m pip install` is the canonical, always-correct form.
+    code:
+      language: bash
+      filename: install-correctly.sh
+      code: |
+        # Confirm which Python you'll actually run:
+        which python
+        python --version
+
+        # Install into THAT interpreter, not the system one:
+        python -m pip install requests
+
+        # Verify it's actually importable from that Python:
+        python -c "import requests; print(requests.__version__)"
+  - title: Use a virtualenv per project
+    likelihood: high
+    body: |
+      Don't install project dependencies into your system Python. Create a venv per project; activate it; install there; never confuse "which Python" again.
+    code:
+      language: bash
+      filename: venv-setup.sh
+      code: |
+        # Create + activate a venv (Python 3.11+):
+        python -m venv .venv
+        source .venv/bin/activate         # macOS/Linux
+        # .venv\Scripts\activate          # Windows PowerShell
+
+        # Install your dependencies:
+        python -m pip install -r requirements.txt
+
+        # Confirm the venv is active:
+        which python      # should print .../.venv/bin/python
+        python -m pip list
+  - title: Install your own project as editable
+    likelihood: high
+    body: |
+      For local code (`from myapp.foo import bar`), make your project pip-installable and install it in editable mode. Edits to source take effect immediately, and your `myapp` package is always on sys.path.
+    code:
+      language: toml
+      filename: pyproject.toml
+      code: |
+        [project]
+        name = "myapp"
+        version = "0.1.0"
+        requires-python = ">=3.10"
+        dependencies = [
+          "requests>=2.31",
+          "pydantic>=2",
+        ]
+
+        [build-system]
+        requires = ["setuptools>=68"]
+        build-backend = "setuptools.build_meta"
+
+        [tool.setuptools.packages.find]
+        where = ["src"]
+  - title: Check sys.path and PYTHONPATH
+    likelihood: medium
+    body: |
+      If a module is installed but not importable, look at `sys.path` to see what Python is searching. If your project root or src/ isn't there, fix the launch (cwd, PYTHONPATH, or pip install -e).
+    code:
+      language: python
+      filename: diagnose.py
+      code: |
+        import sys, os, site
+        print("python:", sys.executable)
+        print("version:", sys.version)
+        print("cwd:", os.getcwd())
+        print("PYTHONPATH:", os.environ.get('PYTHONPATH'))
+        print("site-packages:")
+        for p in site.getsitepackages():
+            print("  ", p)
+        print("sys.path:")
+        for p in sys.path:
+            print("  ", p)
+  - title: Use a tool that pins Python+deps together
+    likelihood: medium
+    body: |
+      `uv`, `poetry`, or `pipenv` lock the Python version and dependency tree together. Eliminates a whole class of "works on my machine" Python issues. `uv` is the fastest as of 2025+ and a drop-in for `pip` + `venv`.
+detection: |
+  Add `python -c "import myapp; import otherdeps"` as a smoke test in CI on every PR — ModuleNotFoundError is deterministic and trivially catchable. For Docker images, run the smoke test as a `RUN` in the build (not just at container startup) so a missing dep fails the build, not the deploy. Track ModuleNotFoundError in production logs by exception class; in healthy services it should be zero.
+related:
+  - module-not-found-nextjs
+  - err-require-esm-nodejs
+  - econnrefused-nodejs
+  - imagepullbackoff-kubernetes
+  - crashloopbackoff-kubernetes
+relatedGuide: python-environment-debugging
+faq:
+  - q: I installed the package with pip, why does Python still say no module named?
+    a: "You installed it into a different Python than the one running your code. Run `which pip` and `which python` — they should both point inside the same venv (or both to the same system Python). On macOS especially, `pip` often points to a system Python while `python3` points to Homebrew's. Always use `python -m pip install` to guarantee they match."
+  - q: What's the difference between ModuleNotFoundError and ImportError?
+    a: "`ModuleNotFoundError` is a subclass of `ImportError` (added in Python 3.6) for the specific case where the module file can't be found at all. Plain `ImportError` covers cases where the module exists but a specific name isn't in it (`ImportError: cannot import name 'X' from 'Y'`). Catch `ImportError` if you want to handle both."
+  - q: Why does VS Code show no error but `python app.py` fails with ModuleNotFoundError?
+    a: "VS Code's IntelliSense uses the interpreter selected in the bottom-right status bar (often a global one or one it auto-discovered). Your terminal uses whichever shell environment is active. They're different. Either select the venv in VS Code's interpreter picker, or run from VS Code's integrated terminal with the venv activated."
+  - q: How do I make sure my Docker image has the right Python deps?
+    a: "Always use a Dockerfile that COPY's `requirements.txt` (or pyproject.toml + uv.lock) and runs `pip install` *inside* the build. Don't COPY local site-packages — binary wheels won't load on a different architecture. Run a smoke test as the last build step: `RUN python -c \"import myapp\"`. If imports fail, the build fails."
+  - q: My import works at the top of one file but fails in another in the same project.
+    a: "Almost always a sys.path issue or a circular import. Check that both files are running through the same Python invocation, with the same cwd. If so, you may have a circular import — A imports B, B imports A — which raises ModuleNotFoundError on the second-loaded file. Restructure to break the cycle (move shared code to a third module)."
+  - q: Should I add my project to PYTHONPATH instead of pip install -e?
+    a: "Don't, in real projects. Setting PYTHONPATH works locally but doesn't help anyone else on the team, breaks CI, and breaks deploys. `pip install -e .` makes the package available in the venv consistently for any tool that uses it (pytest, your IDE, scripts). It's a one-line change with no downsides."
+  - q: I get ModuleNotFoundError for a module that exists in my file tree.
+    a: "Three common reasons: (1) you're running from the wrong directory — sys.path[0] is the script's directory, not your project root. (2) You're missing `__init__.py` and the parent isn't a namespace package. (3) Your module's name shadows a stdlib name (e.g., `email.py` shadows the stdlib `email` package). Rename if so."
+  - q: Does `pip install --user` cause ModuleNotFoundError?
+    a: "It can. `pip install --user` installs to `~/.local/lib/pythonX.Y/site-packages` — but only the matching Python version sees those packages. If you install with Python 3.10's pip and run with 3.11, the install isn't on path. In a venv, `--user` is generally a mistake; install into the venv directly."
+escalate: |
+  ModuleNotFoundError is configuration, not a Python interpreter bug. Before filing upstream, confirm: (a) you can reproduce in a fresh venv with `python -m pip install <only_the_failing_pkg>`, (b) the package's wheel matches your platform (architecture, libc), and (c) `pip show <pkg>` shows it installed where you expect. If a package's published wheel really is broken on your platform, file with the package maintainer with `python --version` and `pip --version` output.
+languages:
+  - python
+keywords:
+  - python module not found error
+  - no module named
+  - python import error
+  - pip install but module not found
+  - python venv import error
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`ModuleNotFoundError` is Python's clearest error. The interpreter looked for a module on `sys.path`, didn't find it, and stopped. The fix is almost always one of two things: you installed into a different Python than the one running your code, or your local code isn't on sys.path. Both are diagnosable in 30 seconds with `python -m pip list` and `python -c 'import sys; print(sys.path)'`.
+
+The single rule that prevents 90% of Python environment pain: always use `python -m pip` instead of bare `pip`. It guarantees the install and the run use the same interpreter, eliminating the most common variant of this error.

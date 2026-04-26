@@ -1,0 +1,150 @@
+---
+service: postgres
+code: "40P01"
+slug: 40p01-deadlock-detected
+title: 'Postgres Error: 40P01 — Deadlock Detected (Cause + Fix)'
+plainTitle: Deadlock Detected
+category: database
+severity: high
+tldrCause: Two or more transactions are waiting on locks held by each other in a cycle. Postgres's deadlock detector kills one of them with SQLSTATE 40P01 to break the cycle, rolling back its work.
+tldrFix: Acquire locks in a consistent order across all transactions (e.g., always update rows by ascending primary key), keep transactions short, use `SELECT ... FOR UPDATE` to lock predictably, and retry the aborted transaction once on 40P01 since deadlocks are inherently racy.
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    ERROR:  deadlock detected
+    DETAIL:  Process 1234 waits for ShareLock on transaction 5678; blocked by process 9012.
+             Process 9012 waits for ShareLock on transaction 6789; blocked by process 1234.
+             Process 1234: UPDATE accounts SET balance = balance - 50 WHERE id = 2;
+             Process 9012: UPDATE accounts SET balance = balance + 50 WHERE id = 1;
+    HINT:  See server log for query details.
+    SQLSTATE: 40P01
+  caption: "Postgres logs both transactions and the rows they're contending for — read DETAIL to find the lock cycle."
+causes:
+  - title: Inconsistent row update order across transactions
+    body: "Tx A locks row 1 then row 2; Tx B locks row 2 then row 1. Both wait forever. The classic example is bank transfers: Tx A debits acct 1 then credits acct 2 while Tx B does the reverse. Always update in primary-key order to eliminate this."
+  - title: Long-running transactions holding locks
+    body: "Transactions that span web requests, manual user input, or batch loops hold locks for seconds to minutes. Any concurrent transaction touching the same rows is at high risk of deadlock. Keep transactions tight — open, do work, commit fast."
+  - title: SELECT FOR UPDATE on a parent before the child
+    body: "Locking a parent row (e.g., `orders`) and then descending into children (`order_items`) deadlocks against another transaction doing the reverse. Choose one direction and document it; mixed direction across the codebase is the root of most deadlocks."
+  - title: Foreign key cascading lock acquisition
+    body: "INSERTs into a child table acquire a share lock on the parent FK row. If another transaction is updating that parent row exclusively, FK insertion blocks. Two transactions inserting children of two different parents while updating each other's parents form a deadlock."
+  - title: Index updates and bulk operations
+    body: "Bulk INSERT or UPDATE statements lock many index pages. Two such bulk operations targeting overlapping index ranges in opposite orders deadlock. Adding `ORDER BY pk` to your bulk updates fixes most of these."
+fixes:
+  - title: Acquire locks in a consistent order
+    likelihood: high
+    body: |
+      Always update or lock rows by ascending primary key. This single rule eliminates the most common deadlock pattern — two transactions touching the same set of rows in opposite orders.
+    code:
+      language: sql
+      filename: transfer.sql
+      code: |
+        -- Wrong: order depends on which account is debited first
+        BEGIN;
+        UPDATE accounts SET balance = balance - 50 WHERE id = 2;
+        UPDATE accounts SET balance = balance + 50 WHERE id = 1;
+        COMMIT;
+
+        -- Right: always lock by ascending id
+        BEGIN;
+        SELECT id FROM accounts WHERE id IN (1, 2) ORDER BY id FOR UPDATE;
+        UPDATE accounts SET balance = balance - 50 WHERE id = 2;
+        UPDATE accounts SET balance = balance + 50 WHERE id = 1;
+        COMMIT;
+  - title: Retry the transaction on 40P01
+    likelihood: high
+    body: |
+      Deadlocks are racy — the same workload, retried, almost always succeeds because the timing differs. Wrap each transaction in a small retry loop with jitter; cap retries at 3 to surface real bugs.
+    code:
+      language: javascript
+      filename: retry.js
+      code: |
+        import { Pool } from 'pg';
+        const pool = new Pool();
+
+        async function withRetry(fn, maxAttempts = 3) {
+          for (let i = 0; i < maxAttempts; i++) {
+            const client = await pool.connect();
+            try {
+              await client.query('BEGIN');
+              const result = await fn(client);
+              await client.query('COMMIT');
+              return result;
+            } catch (err) {
+              await client.query('ROLLBACK');
+              if (err.code !== '40P01' || i === maxAttempts - 1) throw err;
+              await new Promise(r => setTimeout(r, 50 * Math.random() * (i + 1)));
+            } finally {
+              client.release();
+            }
+          }
+        }
+  - title: Shorten transaction scope
+    likelihood: high
+    body: |
+      Don't hold transactions across HTTP request/response or user-input prompts. Acquire locks only when you're ready to commit within milliseconds. Long transactions amplify deadlock probability quadratically.
+  - title: Use advisory locks for cross-row coordination
+    likelihood: medium
+    body: |
+      When the natural lock target spans multiple rows or tables, use Postgres advisory locks (`pg_advisory_xact_lock(id)`). They're cheap, cleared on commit, and let you serialise an arbitrary critical section without holding row locks.
+    code:
+      language: sql
+      filename: advisory.sql
+      code: |
+        BEGIN;
+        SELECT pg_advisory_xact_lock(hashtext('rebalance:user-' || $1));
+        -- complex multi-row logic safe from deadlock here
+        COMMIT;
+  - title: Increase deadlock_timeout and log lock waits
+    likelihood: low
+    body: |
+      `deadlock_timeout` (default 1s) is how long Postgres waits before scanning the lock graph. Lower it for quicker detection during debugging; raise it slightly in production if false-positive deadlocks happen on legitimately slow lock waits. Set `log_lock_waits = on` to log every wait over `deadlock_timeout`.
+detection: |
+  Track 40P01 as a separate metric from generic SQL errors. A non-zero baseline (a few per hour) is normal in busy OLTP systems with retry logic. A spike usually correlates with a deploy that changed transaction shape — cross-reference with deploy timestamps. The Postgres log captures both transactions; mine it for the most common deadlocking SQL pair.
+related:
+  - 23505-unique-violation-postgres
+  - 53300-too-many-connections-postgres
+  - econnrefused-postgres
+  - serialization-failure-postgres
+  - statement-timeout-postgres
+relatedGuide: postgres-error-codes
+faq:
+  - q: 'Is a deadlock a Postgres bug?'
+    a: 'No. Deadlocks are application-level concurrency bugs that Postgres detects and resolves automatically. The detector picks one transaction (the deadlock victim) and aborts it; the other completes normally. Your code''s job is to retry the aborted transaction or surface the failure to the user.'
+  - q: 'How is 40P01 different from 40001 serialization_failure?'
+    a: '40P01 is detected by the lock manager seeing a cycle and is fired regardless of isolation level. 40001 is fired only at SERIALIZABLE isolation when Postgres detects that committing would violate serial-equivalence — a different mechanism. Both are retryable; the retry strategy is identical.'
+  - q: 'Why are some queries safe under READ COMMITTED but deadlock under REPEATABLE READ?'
+    a: 'Higher isolation levels hold locks longer (or use predicate locks). REPEATABLE READ means a transaction sees a consistent snapshot from its first read; combined with row locks, this widens the window for cycles. Run with the lowest isolation that gives correct results.'
+  - q: 'Should I always retry on deadlock?'
+    a: 'Yes for transient conflicts — that''s why deadlock detection exists. Cap retries at 3 with jittered backoff. If the same transaction deadlocks 3 times in a row, you have a structural problem (consistent lock ordering missing, or transactions too long) — surface it and fix in code, don''t retry forever.'
+  - q: 'Does ROLLBACK happen automatically on 40P01?'
+    a: 'Yes. The deadlock victim''s transaction is aborted by Postgres; subsequent statements on that connection error with `current transaction is aborted` until you issue ROLLBACK. The pg drivers wrap this so your application sees the original 40P01.'
+  - q: 'Can SELECT (not FOR UPDATE) cause a deadlock?'
+    a: 'Plain SELECT takes ACCESS SHARE locks, which only conflict with DDL — not with other SELECTs or DMLs. So pure SELECT doesn''t deadlock with normal traffic. SELECT FOR UPDATE / FOR SHARE explicitly takes row-level locks and can deadlock just like UPDATE.'
+  - q: 'Why does my deadlock log only show short queries?'
+    a: 'The log captures the *current* statement of each blocked transaction — usually the one that detected the cycle. The earlier statements that acquired the contending locks aren''t in the deadlock log line. Enable `log_lock_waits = on` to capture the full sequence over time.'
+  - q: 'Does foreign-key checking acquire locks that deadlock?'
+    a: 'Yes — FK checks acquire a share lock on the referenced row. Two transactions inserting children that point at each other''s parents (while concurrently updating those parents) is a frequent deadlock pattern. Either reorder operations consistently or update FKs to use ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED.'
+escalate: |
+  No vendor escalation needed for 40P01 — it's by design and the fix is in your code. Open a Postgres community discussion only if you can demonstrate a reproducible deadlock with no application-level cycle (extremely rare) — Postgres's deadlock detector is well-tested and false positives are essentially unheard of.
+languages:
+  - javascript
+  - python
+  - go
+  - ruby
+  - java
+keywords:
+  - postgres 40p01
+  - postgres deadlock detected
+  - postgres deadlock retry
+  - select for update postgres
+  - pg deadlock
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+SQLSTATE `40P01` — `deadlock_detected` — is the signal that your application has at least two transactions caught in a lock cycle. Postgres's deadlock detector picks a victim, aborts its transaction, and lets the other proceed. The error is never a Postgres bug; it's always a concurrency pattern in your code that needs straightening out.
+
+The single most effective fix is consistent lock ordering. If every transaction touches rows in ascending primary-key order, deadlocks become mathematically impossible — there is no cycle to form. Combined with a cheap retry loop (3 attempts with jitter), most production code never sees 40P01 surface to users at all.

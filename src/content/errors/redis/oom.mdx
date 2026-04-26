@@ -1,0 +1,129 @@
+---
+service: redis
+code: OOM
+slug: oom
+title: 'Redis Error: OOM — Out of Memory (Cause + Fix)'
+plainTitle: Out of Memory
+category: database
+severity: critical
+tldrCause: Redis hit its `maxmemory` limit and the configured `maxmemory-policy` is `noeviction` (the default), so it refuses every write. Reads still work; commands that allocate memory return `OOM command not allowed when used memory > 'maxmemory'`.
+tldrFix: Choose an eviction policy appropriate for your workload (`allkeys-lru` for a cache, `volatile-lru` if you mark only some keys as expirable), set TTLs on cacheable keys, raise `maxmemory` if the data set is genuinely growing, and audit big-key offenders with `redis-cli --bigkeys`.
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    127.0.0.1:6379> SET session:abc '{"user":42,...}'
+    (error) OOM command not allowed when used memory > 'maxmemory'.
+  caption: "Reads still succeed; only memory-allocating commands fail. Check `INFO memory` to confirm `used_memory` against `maxmemory`."
+causes:
+  - title: maxmemory-policy is noeviction (default)
+    body: "Redis ships with `maxmemory-policy noeviction`, which blocks all writes once full. For a cache, this is almost certainly wrong — you want LRU or LFU eviction. For a primary store, it's correct (don't silently lose data) but means you must size for peak."
+  - title: Cache keys without TTLs accumulating forever
+    body: "Code paths that `SET key value` without `EX <seconds>` create keys that live until eviction or DEL. Over weeks, these immortal keys dominate the keyspace. `redis-cli --scan --pattern '*' | xargs redis-cli ttl` reveals untimed keys."
+  - title: Big keys (lists, hashes, sets) growing unbounded
+    body: "A single hash or set with millions of fields can be hundreds of MB on its own. `LPUSH` to a list that's never trimmed, `SADD` to a set that's never expired, or a hash with one field per user-event — all common big-key patterns."
+  - title: COPY-ON-WRITE bloat during BGSAVE/AOF rewrite
+    body: "BGSAVE forks the Redis process; writes after the fork copy memory pages. A high write rate during persistence can momentarily double Redis's memory footprint, triggering OOM even though steady-state usage is fine."
+  - title: Replication backlog or client output buffers
+    body: "Slow replicas or pub/sub subscribers can accumulate gigabytes of output buffer waiting to drain. `INFO clients` shows `client_recent_max_output_buffer`. A misbehaving consumer can OOM the master while the dataset itself is small."
+fixes:
+  - title: Set an appropriate maxmemory-policy
+    likelihood: high
+    body: |
+      For a cache: `allkeys-lru` (or `allkeys-lfu` if access patterns are skewed) silently evicts the least-recently-used keys when full. For a mixed cache+primary store: `volatile-lru` evicts only keys with TTLs, leaving untimed keys untouched.
+    code:
+      language: text
+      filename: redis.conf
+      code: |
+        maxmemory 4gb
+        maxmemory-policy allkeys-lru
+        # or for mixed workloads:
+        # maxmemory-policy volatile-lru
+  - title: Always set TTLs on cache writes
+    likelihood: high
+    body: |
+      Every `SET` for cacheable data should have an `EX` argument. A 24-hour TTL on session data, a 5-minute TTL on hot product lookups — pick a value matched to how often the source-of-truth data changes.
+    code:
+      language: javascript
+      filename: cache.js
+      code: |
+        import { createClient } from 'redis';
+        const redis = createClient();
+        await redis.connect();
+
+        // Wrong: no TTL — key lives forever
+        // await redis.set(`product:${id}`, JSON.stringify(product));
+
+        // Right: 5-minute TTL
+        await redis.set(`product:${id}`, JSON.stringify(product), { EX: 300 });
+  - title: Find and fix big keys
+    likelihood: high
+    body: |
+      `redis-cli --bigkeys` samples the keyspace and reports the largest keys per type. `MEMORY USAGE <key>` returns exact bytes for one key. Look for hashes with millions of fields, lists never trimmed, and sets that grow unbounded.
+    code:
+      language: bash
+      filename: bigkeys.sh
+      code: |
+        # Sample-based scan; safe for production
+        redis-cli --bigkeys
+
+        # Drill into a specific candidate
+        redis-cli MEMORY USAGE user:events:42 SAMPLES 0
+
+        # Trim a list to last 1000 entries
+        redis-cli LTRIM activity:42 -1000 -1
+  - title: Raise maxmemory and right-size the instance
+    likelihood: medium
+    body: |
+      If the working set has legitimately outgrown the box, raise `maxmemory` (and the underlying instance memory). Leave 25-50% headroom over `used_memory_peak` for fork/copy-on-write during BGSAVE. Don't run Redis at >80% of OS memory.
+  - title: Diagnose client output buffer bloat
+    likelihood: low
+    body: |
+      `INFO clients` plus `CLIENT LIST` reveals slow consumers. Set `client-output-buffer-limit` for `pubsub` and `replica` to terminate runaway clients before they OOM the master.
+detection: |
+  Alarm on `used_memory / maxmemory > 0.85` for 5 minutes. Monitor `evicted_keys` rate — a non-zero baseline is normal under LRU policies, but a sudden spike means a flood of new keys is pushing out hot data. For replication setups, alarm on `master_repl_offset - slave_repl_offset` widening — replication lag often precedes OOM as buffers fill.
+related:
+  - wrongtype-redis
+  - readonly-redis
+  - busy-redis-script
+  - max-clients-redis
+  - 53300-too-many-connections-postgres
+relatedGuide: redis-error-codes
+faq:
+  - q: 'What''s the difference between Redis OOM and OS OOM-killer?'
+    a: 'Redis OOM is a soft limit — Redis enforces `maxmemory` and refuses writes (or evicts) before exceeding it. OS OOM-killer is a hard kill of the Redis process when the host runs out of RAM. The OS kill is much worse: full data loss for non-persistent setups, slow recovery for AOF setups. Always set `maxmemory` to leave OS headroom.'
+  - q: 'Should I use allkeys-lru or volatile-lru?'
+    a: '`allkeys-lru` if Redis is purely a cache and every key is evictable. `volatile-lru` if you mix cached data (with TTLs) and primary data (no TTLs) — only the timed keys evict. The wrong choice doesn''t cause data loss but does cause unexpected eviction patterns.'
+  - q: 'Does Redis OOM cause data loss?'
+    a: 'With `noeviction` (default), no — writes fail but existing data is preserved. With LRU/LFU policies, yes — evicted keys are gone. For data you can''t lose, set TTLs only on the keys that *can* be evicted and use `volatile-lru` so primary data stays.'
+  - q: 'Why does my Redis show low used_memory but I still get OOM?'
+    a: 'Check `mem_fragmentation_ratio` from `INFO memory`. Ratios above 1.5 mean the allocator is holding pages with sparse data. The fix is usually `MEMORY PURGE` (returns free pages to OS), upgrading to a newer Redis with jemalloc improvements, or restarting Redis on a maintenance window.'
+  - q: 'What is the OOM error during BGSAVE about?'
+    a: 'BGSAVE forks the Redis process. Writes after the fork copy modified memory pages — at peak, Redis can use up to 2× its dataset size. If the host can''t accommodate that doubling, you OOM. Mitigate with `disable-thp` (transparent huge pages off), more host memory, or persistence on a replica instead of the master.'
+  - q: 'How do I prevent OOM from a single big key?'
+    a: 'Audit with `redis-cli --bigkeys` regularly. Set hard limits in code: `LTRIM` after every `LPUSH` to cap list size, `ZREMRANGEBYRANK` to cap sorted-set size, application-level checks before `SADD`. Big keys also slow down operations — they''re a performance bug as well as a memory one.'
+  - q: 'Can replication cause OOM?'
+    a: 'Yes — on the master. The replication backlog buffer (`repl-backlog-size`) and per-replica output buffers store writes for replicas to consume. If a replica falls behind, those buffers grow until OOM. Monitor `client_recent_max_output_buffer` and tune `client-output-buffer-limit replica`.'
+  - q: 'Should I use Redis on Flash / disk-backed Redis to avoid OOM?'
+    a: 'Possibly. Redis Enterprise''s Auto Tiering (formerly Redis on Flash) and Dragonfly''s tiered storage move cold data to SSD, raising effective capacity 5-10x at lower cost. Open-source Redis is in-memory only — for OSS users the answer is more RAM, better eviction, and TTL discipline.'
+escalate: |
+  Escalate to your Redis provider if (a) `INFO memory` shows large `used_memory_overhead` you can't account for (possible memory leak in a Redis module or a known bug version), (b) fragmentation ratio stays above 2.0 even after `MEMORY PURGE`, or (c) OOM fires despite `evicted_keys` increasing — that suggests eviction can't keep up with allocation pressure, which can be a bug in custom Lua scripts or modules.
+languages:
+  - javascript
+  - python
+  - go
+  - ruby
+keywords:
+  - redis oom
+  - redis out of memory
+  - redis maxmemory
+  - redis allkeys-lru
+  - redis eviction policy
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+Redis `OOM` is the application-visible signal that the server has hit `maxmemory` and the configured policy refuses to evict. The default policy (`noeviction`) is conservative — it preserves data at the cost of write availability. For a typical cache workload, that default is wrong: you want `allkeys-lru` so the least-useful keys silently disappear and writes keep working.
+
+The cheapest fix that prevents 90% of Redis OOM in production is TTL discipline. Every cache write should specify an expiry; every list and set should have a hard size cap enforced by `LTRIM` or equivalent. Combined with periodic `--bigkeys` audits and a sensible eviction policy, Redis memory becomes a self-managing resource rather than a runtime hazard.

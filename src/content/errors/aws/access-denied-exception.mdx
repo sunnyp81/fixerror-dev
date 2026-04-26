@@ -106,7 +106,7 @@ faq:
     a: 'For sensitive resources, AWS may suppress the explanatory portion (e.g., it won''t say which SCP denied you across an Organizations boundary). Enable CloudTrail data events and check the `errorMessage` field there — it often contains more detail than the API response.'
   - q: I added the policy but still get AccessDeniedException. What''s going on?
     a: 'Three usual culprits: (1) IAM is eventually consistent — wait 30-60 seconds after attaching, (2) a permission boundary or SCP is denying despite your Allow, or (3) the policy is attached to a different principal than the one making the call. Print the caller identity (`aws sts get-caller-identity`) at the call site to confirm.'
-  - q: Does `Effect: Deny` always win over `Effect: Allow`?
+  - q: "Does `Effect: Deny` always win over `Effect: Allow`?"
     a: 'Yes. AWS policy evaluation is "explicit deny wins, then default deny, then explicit allow." A single Deny anywhere in the evaluation chain (identity policy, resource policy, SCP, boundary, session policy) blocks the request even with multiple Allows.'
   - q: 'Can `s3:*` in my policy still produce AccessDeniedException for s3:GetObject?'
     a: 'Yes — if the bucket policy or KMS key policy denies, if your permission boundary doesn''t include s3:GetObject, or if the object is encrypted with a KMS key your role can''t decrypt. `s3:*` only grants S3 actions; it does not grant `kms:Decrypt`.'
