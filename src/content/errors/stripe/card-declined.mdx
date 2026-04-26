@@ -1,0 +1,138 @@
+---
+service: stripe
+code: card_declined
+slug: card-declined
+title: 'Stripe Error: card_declined — Card Was Declined (Cause + Fix)'
+plainTitle: Card Was Declined
+httpStatus: 402
+category: billing
+severity: high
+tldrCause: The customer's card issuer refused to authorise the charge. Stripe relays the issuer's decline reason in `decline_code` (e.g., `insufficient_funds`, `lost_card`, `do_not_honor`).
+tldrFix: Show the customer the human-readable decline reason, prompt them to try a different card, and only retry the same card after the situation that caused the decline has plausibly changed (e.g., funds added, fraud lock cleared).
+contextCode:
+  language: javascript
+  filename: charge.js
+  code: |
+    try {
+      const intent = await stripe.paymentIntents.create({
+        amount: 4999,
+        currency: 'gbp',
+        payment_method: 'pm_card_declined',
+        confirm: true,
+      });
+    } catch (err) {
+      // err.type === 'StripeCardError'
+      // err.code === 'card_declined'
+      // err.decline_code === 'insufficient_funds'
+      // err.message === 'Your card has insufficient funds.'
+    }
+  caption: "A failed PaymentIntent throws `StripeCardError` with `code: 'card_declined'` and a more specific `decline_code`."
+causes:
+  - title: Insufficient funds
+    body: "The most common decline. Customer's account doesn't have enough to cover the charge plus any held authorisations. `decline_code: insufficient_funds`."
+  - title: Issuer fraud lock
+    body: "The issuing bank flagged the transaction as suspicious — often new merchant, unusual amount, or country mismatch. `decline_code: do_not_honor` or `fraudulent`. The customer's card itself is fine; their bank just doesn't trust this charge."
+  - title: Lost or stolen card
+    body: "The card has been reported lost or stolen and is fully blocked. `decline_code: lost_card` or `stolen_card`. Never retry — the card will never work again."
+  - title: 3D Secure required but not completed
+    body: "SCA / 3D Secure was required by the issuer (mandatory in the EEA under PSD2). The PaymentIntent went to `requires_action` but the customer never completed the challenge. Surface the next-action URL or use Stripe.js `confirmCardPayment()`."
+  - title: Wrong CVC, expiry, or postal code
+    body: "Card details don't match what the issuer has on file. `decline_code: incorrect_cvc`, `expired_card`, or `incorrect_zip`. Have the customer re-enter."
+fixes:
+  - title: Surface the issuer's reason — never just "Card declined"
+    likelihood: high
+    body: |
+      Stripe maps every `decline_code` to a customer-friendly message (see [Stripe's decline_code reference](https://stripe.com/docs/declines/codes)). Show that to the customer instead of a generic failure message — it converts dramatically better because the customer knows what to do next.
+    code:
+      language: javascript
+      filename: handleDecline.js
+      code: |
+        const DECLINE_MESSAGES = {
+          insufficient_funds: 'Your card was declined for insufficient funds. Try a different card.',
+          incorrect_cvc: 'Your security code is incorrect. Please re-enter and try again.',
+          expired_card: 'Your card has expired. Please use another card.',
+          do_not_honor: "Your bank declined this charge. Contact your bank or try a different card.",
+          lost_card: 'This card has been reported lost. Please use a different card.',
+          stolen_card: 'This card has been reported stolen. Please use a different card.',
+          generic_decline: 'Your card was declined. Try a different card or contact your bank.',
+        };
+
+        function declineMessage(err) {
+          return DECLINE_MESSAGES[err.decline_code]
+            ?? DECLINE_MESSAGES.generic_decline;
+        }
+  - title: Don't auto-retry hard declines
+    likelihood: high
+    body: |
+      Hard declines (`lost_card`, `stolen_card`, `pickup_card`, `revocation_of_authorization`) will never succeed and may flag your account for fraud-pattern abuse if you keep retrying. Mark these as terminal and require a different card. Soft declines (`insufficient_funds`, `try_again_later`) can be retried on a new attempt by the customer.
+  - title: Implement Smart Retries (Stripe Billing only)
+    likelihood: medium
+    body: |
+      For subscription invoices, enable Smart Retries in your Billing settings. Stripe machine-learns the optimal retry schedule per card. For one-off charges, retries should be customer-initiated only.
+  - title: Use 3D Secure 2 / Payment Element for SCA
+    likelihood: medium
+    body: |
+      If the decline reason is `authentication_required`, you didn't complete SCA. Use the Stripe Payment Element (which handles SCA automatically) or `stripe.confirmCardPayment()` with the PaymentIntent client_secret.
+    code:
+      language: javascript
+      filename: confirmSCA.js
+      code: |
+        const { error, paymentIntent } = await stripe.confirmCardPayment(
+          clientSecret,
+          { payment_method: paymentMethodId }
+        );
+        if (error?.code === 'card_declined' && error.decline_code === 'authentication_required') {
+          // SCA challenge interrupted — retry confirmCardPayment to re-trigger the modal.
+        }
+  - title: Test with Stripe's decline test cards
+    likelihood: low
+    body: |
+      Stripe has dedicated test cards for every decline reason. `4000000000000002` always returns `card_declined: generic_decline`. `4000000000009995` returns `insufficient_funds`. `4000002500003155` requires authentication. Use these to test your decline handling end-to-end before going live.
+detection: |
+  Set up a Stripe webhook for `payment_intent.payment_failed` and log `last_payment_error.decline_code` to your error monitoring. Track decline rate over rolling 24-hour and 7-day windows; a sudden spike usually means a fraud rule change or a misconfigured webhook is preventing legitimate charges.
+related:
+  - insufficient-funds
+  - expired-card
+  - authentication-required
+  - rate-limit-error-stripe
+  - signature-verification-failed-stripe
+relatedHttp: 402
+relatedGuide: handling-payment-declines
+faq:
+  - q: What's the difference between `code` and `decline_code` in a Stripe error?
+    a: '`code` is always `card_declined` for issuer declines. `decline_code` is the granular reason: `insufficient_funds`, `lost_card`, `do_not_honor`, etc. Always read `decline_code` to decide whether to retry, show a specific message, or block the card.'
+  - q: Should I retry a `card_declined` error automatically?
+    a: 'Only soft declines (`try_again_later`, `processing_error`) should auto-retry, and only after a delay. Never auto-retry hard declines (`lost_card`, `stolen_card`, `pickup_card`, `revocation_of_authorization`) — Stripe may flag your account for fraud-pattern abuse.'
+  - q: Why does my test card work in test mode but fail in live mode?
+    a: 'Stripe test card numbers (4242…) only work with test API keys. In live mode you need a real card. Conversely, real card numbers in test mode are rejected. The test/live mode is determined by which API key you use, not the card.'
+  - q: "What does `decline_code: do_not_honor` mean?"
+    a: '`do_not_honor` is the most common opaque issuer decline. The bank declined the charge but didn''t share the reason with Stripe. Common underlying causes: fraud rule, recent card replacement, or unusual spending pattern. Tell the customer to call their bank or try another card.'
+  - q: Why did my customer''s card decline as `card_declined` even though they have funds?
+    a: 'Issuers decline for many reasons beyond funds: 3D Secure failure, fraud-prevention models, location mismatch, recent disputes, or new-card activation pending. The `decline_code` narrows it down. If `decline_code: do_not_honor` and the customer has funds, it''s almost always fraud-prevention — they should call their bank.'
+  - q: How do I prevent `card_declined` errors from spamming my error tracker?
+    a: 'Card declines are expected business outcomes, not application errors. Filter them out of your exception tracker and route them to a separate "payment outcomes" stream. Sentry: tag the error and use a beforeSend filter. Datadog: emit as a metric, not a log error.'
+  - q: Does Stripe Radar block charges before `card_declined`?
+    a: 'Yes. Radar runs *before* the issuer sees the charge. A Radar block returns an error with `type: StripeCardError` and `code: card_declined` but the message points to your Radar rules. Check Dashboard → Radar → Reviews to see why.'
+  - q: How is `card_declined` different from `payment_intent_payment_attempt_failed`?
+    a: '`card_declined` is the immediate API error you get from the SDK. `payment_intent.payment_failed` is the webhook event that fires after the PaymentIntent attempt fails — including `card_declined` reasons. Use the webhook for asynchronous flows (3DS, off-session retries) where you don''t see the immediate API response.'
+escalate: |
+  Contact Stripe support if (a) you see consistent `do_not_honor` declines from cards that work elsewhere, (b) decline rates suddenly spike with no Radar rule change, or (c) `processing_error` declines persist for more than a few hours — that's a Stripe-side incident. Otherwise, declines are between the customer and their issuer; Stripe support can't override an issuer's decision.
+languages:
+  - javascript
+  - python
+  - ruby
+  - php
+  - go
+  - java
+keywords:
+  - stripe card_declined
+  - stripe declined error
+  - stripe insufficient_funds
+  - stripe payment failed
+  - stripe decline_code
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+The `card_declined` error is what Stripe returns when the customer's card issuer (the bank that issued the card) refuses to authorise a charge. Stripe itself rarely blocks charges; almost all `card_declined` errors come from the issuer. Your job as the integrator is to translate that decline into a useful message and decide whether (and when) to let the customer try again.

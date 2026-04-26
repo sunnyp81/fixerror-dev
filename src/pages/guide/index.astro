@@ -1,0 +1,57 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import { canonical } from '../../lib/seo';
+import { breadcrumbSchema, collectionPageSchema } from '../../lib/schema';
+
+const guides = (await getCollection('guides')).sort((a, b) =>
+  a.data.title.localeCompare(b.data.title),
+);
+
+const byCategory = guides.reduce<Record<string, typeof guides>>((acc, g) => {
+  (acc[g.data.category] ||= []).push(g);
+  return acc;
+}, {});
+
+const path = '/guide/';
+const title = 'Guides — fixerror.dev';
+const description = 'Long-form guides on retry strategies, idempotency, circuit breakers, error monitoring, and the patterns behind production-grade error handling.';
+
+const jsonLd = [
+  breadcrumbSchema([{ name: 'Home', url: '/' }, { name: 'Guides', url: path }]),
+  collectionPageSchema({
+    name: title,
+    description,
+    url: canonical(path),
+    items: guides.map((g) => ({ name: g.data.title, url: `/guide/${g.data.slug}/` })),
+  }),
+];
+---
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={[{ name: 'Home', url: '/' }, { name: 'Guides' }]} />
+    <header class="mb-10">
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight mb-3">Guides</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)] max-w-3xl">
+        Long-form guides on the patterns behind production-grade error handling.
+      </p>
+    </header>
+
+    {Object.entries(byCategory).map(([cat, items]) => (
+      <section class="mb-10">
+        <h2 class="text-xl font-semibold tracking-tight mb-4">{cat}</h2>
+        <ul class="space-y-2">
+          {items.map((g) => (
+            <li>
+              <a href={`/guide/${g.data.slug}/`} class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)]">
+                <div class="font-semibold mb-1">{g.data.title}</div>
+                <div class="text-sm text-[color:var(--color-text-muted)]">{g.data.description}</div>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+  </div>
+</BaseLayout>

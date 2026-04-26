@@ -1,0 +1,151 @@
+---
+title: Database Connection Debugging — A Layered Approach
+slug: database-connection-debugging
+description: When your app can't reach the database, the failure is in one of four layers — network, transport, authentication, or session. This guide walks through each layer's symptoms and tools.
+category: Debugging
+keywords:
+  - database connection
+  - econnrefused
+  - postgres connection
+  - mysql connection
+  - connection pool
+relatedErrors:
+  - econnrefused
+  - too-many-connections
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+When `Cannot connect to database` lands at 3 a.m., the worst thing you can do is randomly try things. Database connection failures live in one of four layers, each with distinct symptoms and tools. Walk them in order, and the failure is usually identified in under five minutes.
+
+## The four layers
+
+1. **Network**: can the TCP packets even reach the database host?
+2. **Transport**: did TLS / SSL negotiate successfully?
+3. **Authentication**: did the database accept the credentials?
+4. **Session**: did the connection establish and remain healthy?
+
+Each error type lives in exactly one layer.
+
+## Layer 1: Network
+
+**Symptoms**: ECONNREFUSED, ETIMEDOUT, EHOSTUNREACH, "connection timed out", "no route to host".
+
+**Tools**: `ping`, `traceroute`, `tcpdump`, `pg_isready`, `mysqladmin ping`, `nc -zv host port`.
+
+**First check**: is anything listening at all?
+
+```bash
+# Linux/Mac
+nc -zv db.example.com 5432
+# Connection to db.example.com 5432 port [tcp/postgresql] succeeded!  ← layer 1 OK
+
+# Windows PowerShell
+Test-NetConnection -ComputerName db.example.com -Port 5432
+```
+
+If `nc` fails:
+- Wrong host or port (most common).
+- Firewall, security group, or VPC route blocking.
+- Database actually down.
+
+If you're on AWS RDS and `nc` fails from your EC2 instance, 95% of the time it's the security group. The DB's SG must allow inbound from your app's SG (not from your IP — that only matters if you're connecting from a laptop with `Publicly Accessible: Yes`).
+
+**Container-specific**: `localhost` inside a container means the container itself. To reach the host, use `host.docker.internal` (Docker Desktop) or the host's actual LAN IP. To reach another container, use the service name from `docker-compose.yml`.
+
+## Layer 2: Transport (TLS / SSL)
+
+**Symptoms**: "SSL handshake failed", "certificate verify failed", "no SSL support compiled into PostgreSQL", "self signed certificate in certificate chain".
+
+**Tools**: `openssl s_client -connect host:port -starttls postgres`, `psql sslmode=require`, your driver's TLS verbose logging.
+
+If `nc` succeeded but the database client errors on connect, you're past Layer 1. Most modern managed databases require TLS; old client libraries may not negotiate it correctly.
+
+```bash
+# Manually test TLS negotiation:
+openssl s_client -starttls postgres -connect db.example.com:5432
+```
+
+Common fixes:
+- Set `sslmode=require` (or `verify-full`) in the connection string.
+- Update the client library — old versions of `node-postgres`, `mysql2`, or `psycopg2` don't handle modern TLS correctly.
+- If the server uses a self-signed cert, either trust it (`sslrootcert=/path/to/ca.crt`) or downgrade verification (`sslmode=require` skips CA verification, while `verify-full` enforces it).
+
+## Layer 3: Authentication
+
+**Symptoms**: "password authentication failed", "FATAL: password authentication failed for user", "Access denied for user", "no pg_hba.conf entry for host".
+
+**Tools**: server-side database logs, `psql -U user -h host` (or equivalent), the database's own audit log.
+
+Connection refused at this layer means TCP+TLS worked but credentials don't. Things that go wrong:
+
+- **Wrong password**: most common; typo, missing character, env var truncation. Always print the connection target (with password redacted) at app startup.
+- **Wrong user**: database user doesn't exist or doesn't match the credential.
+- **`pg_hba.conf` deny**: Postgres can be running but configured to reject your client IP. Check the server log for `no pg_hba.conf entry for host "10.0.x.x"`.
+- **Stale credentials**: rotated DB password but app still has old secret. Check your secret manager's last-update timestamp vs. your app's deploy time.
+- **MySQL user with `host=` restriction**: MySQL users have a host part: `appuser@10.0.0.5`. Trying to log in from `10.0.0.6` fails even with the right password.
+
+## Layer 4: Session
+
+**Symptoms**: "too many connections", "connection terminated unexpectedly", "server closed the connection unexpectedly", "lost connection to MySQL server during query", "broken pipe", "connection reset by peer".
+
+**Tools**: connection-pool logging in your app, `pg_stat_activity`, `SHOW PROCESSLIST`, network logging.
+
+Connection succeeded but didn't stay healthy. Causes:
+
+**Pool exhaustion (your side)**: pool is too small for concurrent load, or connections are leaking (not returned to the pool). Symptoms: requests queue waiting for connections; error after a `connectionTimeoutMillis`. Fix: increase pool size, find the leak.
+
+**`max_connections` exhaustion (server side)**: too many app instances × per-app pool size > server `max_connections`. Postgres returns `FATAL: sorry, too many clients already`. Fix: pool sizes × instance count must be < `max_connections - reserved`. Use PgBouncer (transaction pooling) to multiplex.
+
+**Idle timeout disconnect**: load balancer (NLB, ALB, ELB) closes idle TCP connections after a timeout (typically 350s on AWS NLB). Your pool returns a dead connection on the next checkout. Fix: TCP keepalives on the connection, or set the pool's `idleTimeout < load balancer's idle timeout`.
+
+**Server crash / failover**: managed Postgres reboots during minor version updates; replica failover swaps the primary. Pool needs to detect dead connections and reconnect. Most pools do this if you configure `validate-on-borrow` or equivalent.
+
+**Connection lifetime cap**: cloud providers cap connection lifetime (RDS Proxy: 24h max). Pool needs `max-lifetime < cap`.
+
+## Diagnostic flowchart
+
+```
+Cannot connect to DB
+│
+├─ Run: nc -zv host port (or pg_isready)
+│   ├─ Fails → Layer 1: Network
+│   └─ Succeeds → next
+│
+├─ Run: openssl s_client (or driver TLS verbose)
+│   ├─ TLS errors → Layer 2: Transport
+│   └─ Succeeds → next
+│
+├─ Check: server-side log on connect attempt
+│   ├─ Auth/pg_hba errors → Layer 3: Authentication
+│   └─ Connection accepted → next
+│
+└─ Check: pool/server connection counts, query timing
+    └─ Layer 4: Session
+```
+
+## Pool sizing rule of thumb
+
+For pool size per app instance: `(num_cores × 2) + effective_spindle_count` is the classic recommendation, but for most modern OLTP workloads, 10–20 connections per app instance is plenty. With N app instances:
+
+```
+total_pool_size_per_instance × N + maintenance_connections < server_max_connections
+```
+
+If you can't fit, introduce PgBouncer in transaction pooling mode. It multiplexes many app connections to fewer DB connections.
+
+## Operational hygiene
+
+- Always set `application_name` (or equivalent) so you can correlate `pg_stat_activity` rows to your app.
+- Log the resolved connection target at startup (with password redacted).
+- Health-check both the network layer (`pg_isready`) and the SQL layer (`SELECT 1`) — they fail differently and the alert runbook is different.
+- Don't hardcode the DB host; resolve via DNS so failover updates propagate without redeploys.
+- Cap pool's connection lifetime to avoid stale TLS sessions and to play nice with load-balancer idle timeouts.
+
+## Common red herrings
+
+- **High CPU on the DB host** doesn't cause ECONNREFUSED; it causes slow connects, occasional `connection terminated`, and query timeouts.
+- **Replication lag** doesn't cause connection errors; it causes stale reads from a hot standby.
+- **A single instance failing while others succeed** points at that instance's network path, not at the DB. Confirm with `nc` from the failing instance.
+
+When you can't connect to a database, walk these four layers in order. The wrong fix at the wrong layer wastes hours; the right fix usually takes minutes once you know which layer owns the failure.

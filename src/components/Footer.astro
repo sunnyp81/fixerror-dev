@@ -1,0 +1,73 @@
+---
+const topServices = [
+  { id: 'stripe', name: 'Stripe' },
+  { id: 'aws', name: 'AWS' },
+  { id: 'gcp', name: 'Google Cloud' },
+  { id: 'github', name: 'GitHub' },
+  { id: 'openai', name: 'OpenAI' },
+  { id: 'anthropic', name: 'Anthropic' },
+  { id: 'vercel', name: 'Vercel' },
+  { id: 'cloudflare', name: 'Cloudflare' },
+  { id: 'postgres', name: 'Postgres' },
+  { id: 'redis', name: 'Redis' },
+  { id: 'nextjs', name: 'Next.js' },
+  { id: 'kubernetes', name: 'Kubernetes' },
+];
+
+const httpCodes = [400, 401, 403, 404, 408, 409, 422, 429, 500, 502, 503, 504];
+
+const guides = [
+  { slug: 'retry-strategies', name: 'Retry strategies' },
+  { slug: 'exponential-backoff', name: 'Exponential backoff' },
+  { slug: 'idempotency-keys', name: 'Idempotency keys' },
+  { slug: 'circuit-breakers', name: 'Circuit breakers' },
+  { slug: 'rate-limit-debugging', name: 'Debug rate limits' },
+  { slug: 'error-monitoring-101', name: 'Error monitoring 101' },
+];
+
+const year = new Date().getFullYear();
+---
+<footer class="border-t border-[color:var(--color-border)] mt-24 bg-[color:var(--color-bg-elev)]">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-8 text-sm">
+      <div>
+        <h3 class="text-[color:var(--color-text)] font-semibold mb-3">Services</h3>
+        <ul class="space-y-1.5 text-[color:var(--color-text-muted)]">
+          {topServices.map((s) => (
+            <li><a href={`/${s.id}/`} class="hover:text-[color:var(--color-accent)]">{s.name}</a></li>
+          ))}
+        </ul>
+      </div>
+      <div>
+        <h3 class="text-[color:var(--color-text)] font-semibold mb-3">HTTP codes</h3>
+        <ul class="space-y-1.5 text-[color:var(--color-text-muted)]">
+          {httpCodes.map((c) => (
+            <li><a href={`/http/${c}/`} class="hover:text-[color:var(--color-accent)] font-mono">{c}</a></li>
+          ))}
+        </ul>
+      </div>
+      <div>
+        <h3 class="text-[color:var(--color-text)] font-semibold mb-3">Guides</h3>
+        <ul class="space-y-1.5 text-[color:var(--color-text-muted)]">
+          {guides.map((g) => (
+            <li><a href={`/guide/${g.slug}/`} class="hover:text-[color:var(--color-accent)]">{g.name}</a></li>
+          ))}
+        </ul>
+      </div>
+      <div>
+        <h3 class="text-[color:var(--color-text)] font-semibold mb-3">fixerror.dev</h3>
+        <ul class="space-y-1.5 text-[color:var(--color-text-muted)]">
+          <li><a href="/" class="hover:text-[color:var(--color-accent)]">Home</a></li>
+          <li><a href="/glossary/" class="hover:text-[color:var(--color-accent)]">Glossary</a></li>
+          <li><a href="/compare/" class="hover:text-[color:var(--color-accent)]">Comparisons</a></li>
+          <li><a href="/llms.txt" class="hover:text-[color:var(--color-accent)]">llms.txt</a></li>
+          <li><a href="/sitemap-index.xml" class="hover:text-[color:var(--color-accent)]">Sitemap</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="mt-12 pt-6 border-t border-[color:var(--color-border)] flex flex-col md:flex-row items-center justify-between gap-4 text-xs text-[color:var(--color-text-dim)]">
+      <p>&copy; {year} fixerror.dev. Plain-English fixes for every error.</p>
+      <p class="font-mono">Built for developers debugging in production.</p>
+    </div>
+  </div>
+</footer>

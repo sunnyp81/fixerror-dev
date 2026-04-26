@@ -1,0 +1,89 @@
+---
+import { getCollection, render } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import { canonical } from '../../lib/seo';
+import { breadcrumbSchema, techArticleSchema } from '../../lib/schema';
+
+export async function getStaticPaths() {
+  const guides = await getCollection('guides');
+  return guides.map((g) => ({
+    params: { slug: g.data.slug },
+    props: { entry: g },
+  }));
+}
+
+const { entry } = Astro.props;
+const data = entry.data;
+const { Content, headings } = await render(entry);
+
+const allErrors = await getCollection('errors');
+const related = data.relatedErrors
+  .map((slug) => allErrors.find((e) => e.data.slug === slug))
+  .filter((e): e is NonNullable<typeof e> => Boolean(e));
+
+const path = `/guide/${data.slug}/`;
+const url = canonical(path);
+
+const breadcrumb = [
+  { name: 'Home', url: '/' },
+  { name: 'Guides', url: '/guide/' },
+  { name: data.title },
+];
+
+const jsonLd = [
+  breadcrumbSchema(breadcrumb),
+  techArticleSchema({
+    headline: data.title,
+    description: data.description,
+    url,
+    datePublished: data.publishedAt,
+    dateModified: data.updatedAt,
+    keywords: data.keywords,
+  }),
+];
+---
+<BaseLayout title={data.title} description={data.description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={breadcrumb} />
+
+    <header class="mb-8">
+      <div class="text-xs font-mono uppercase tracking-wider text-[color:var(--color-text-dim)] mb-2">{data.category}</div>
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight mb-3">{data.title}</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)] leading-relaxed">{data.description}</p>
+    </header>
+
+    {headings.length > 3 && (
+      <nav class="mb-8 not-prose rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4">
+        <div class="text-xs font-mono uppercase tracking-wider text-[color:var(--color-text-dim)] mb-2">On this page</div>
+        <ul class="space-y-1 text-sm">
+          {headings.filter((h) => h.depth <= 3).map((h) => (
+            <li class:list={[h.depth === 3 ? 'pl-4' : '']}>
+              <a href={`#${h.slug}`} class="text-[color:var(--color-text-muted)] hover:text-[color:var(--color-accent)]">{h.text}</a>
+            </li>
+          ))}
+        </ul>
+      </nav>
+    )}
+
+    <article class="prose">
+      <Content />
+    </article>
+
+    {related.length > 0 && (
+      <section class="mt-12">
+        <h2 class="text-xl font-semibold tracking-tight mb-4">Related errors</h2>
+        <ul class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {related.map((e) => (
+            <li>
+              <a href={`/${e.data.service}/${e.data.slug}/`} class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-3 hover:border-[color:var(--color-accent)]">
+                <code class="text-sm text-[color:var(--color-accent)]">{e.data.code}</code>
+                <span class="text-sm text-[color:var(--color-text-muted)] ml-2">— {e.data.plainTitle}</span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+  </div>
+</BaseLayout>

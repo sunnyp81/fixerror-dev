@@ -1,0 +1,151 @@
+---
+service: aws
+code: ThrottlingException
+slug: throttling-exception
+title: 'AWS Error: ThrottlingException — API Rate Limit Exceeded (Cause + Fix)'
+plainTitle: API Rate Limit Exceeded
+httpStatus: 400
+category: rate-limit
+severity: high
+tldrCause: You exceeded the per-second or per-account API request limit for an AWS service. Most AWS APIs use a token bucket — sustained or bursty traffic above the bucket refill rate gets throttled.
+tldrFix: Retry with exponential backoff and jitter (the AWS SDKs do this by default), reduce concurrent calls, batch where the API supports it, and request a service quota increase if the limit is genuinely too low for your workload.
+contextCode:
+  language: python
+  filename: throttle.py
+  code: |
+    import boto3
+    from botocore.exceptions import ClientError
+
+    ddb = boto3.client('dynamodb')
+
+    try:
+        ddb.describe_table(TableName='Orders')
+    except ClientError as e:
+        # e.response['Error']['Code'] == 'ThrottlingException'
+        # e.response['ResponseMetadata']['HTTPStatusCode'] == 400
+        # e.response['Error']['Message'] == 'Rate exceeded'
+        if e.response['Error']['Code'] == 'ThrottlingException':
+            ...  # back off and retry
+  caption: "ThrottlingException returns HTTP 400 with `Code: ThrottlingException` in the error envelope — not 429."
+causes:
+  - title: Bursty calls exceeding the token bucket refill rate
+    body: "AWS APIs use token-bucket rate limiting. The bucket has a max size (burst) and refills at a steady rate (sustained). A loop that calls `DescribeTable` 200 times in 50ms drains the burst bucket and starts throttling on call 51."
+  - title: Account-wide quota, not per-resource
+    body: "Most AWS service quotas (e.g., DescribeInstances at 100 RPS) apply to the entire account in a region, not per IAM user or per resource. Multiple Lambda functions, EC2 instances, or scripts sharing one account share one quota."
+  - title: Wrong API for the workload
+    body: "Using `DescribeTable` in a hot path instead of caching it; using `GetItem` in a loop instead of `BatchGetItem`; calling `ListObjects` on every request instead of S3 inventory. Switching to a paginated, batched, or cached pattern often eliminates throttling."
+  - title: Cross-region or cross-service amplification
+    body: "A single user request that fans out into N service calls (DDB + S3 + KMS + STS) multiplies your QPS by N. The throttled service is rarely the bottleneck — the upstream caller fan-out is."
+  - title: SDK retry storms after a brief outage
+    body: "When a service hiccups, every SDK client retries simultaneously. Without jitter, the retries align and overwhelm the recovering service, turning a 30-second blip into a 5-minute throttling cascade."
+fixes:
+  - title: Use SDK adaptive retry mode
+    likelihood: high
+    body: |
+      Modern AWS SDKs ship with `adaptive` retry mode — it tracks throttling rate and slows the client down dynamically. It's not the default in older SDK versions; turn it on explicitly for any high-throughput client.
+    code:
+      language: python
+      filename: client.py
+      code: |
+        import boto3
+        from botocore.config import Config
+
+        config = Config(
+            retries={
+                'max_attempts': 10,
+                'mode': 'adaptive',  # token-bucket aware
+            },
+        )
+
+        ddb = boto3.client('dynamodb', config=config)
+  - title: Batch where the API supports it
+    likelihood: high
+    body: |
+      Replace single-item calls with batch calls. `BatchGetItem` reads up to 100 items per call. `BatchWriteItem` writes up to 25. SQS `SendMessageBatch` sends up to 10. CloudWatch `PutMetricData` accepts 1,000 metrics per call. The change usually cuts your QPS by 10-100x.
+    code:
+      language: python
+      filename: batch.py
+      code: |
+        keys = [{'OrderId': {'S': oid}} for oid in order_ids]
+        # split into chunks of 100 for BatchGetItem
+        for chunk in (keys[i:i+100] for i in range(0, len(keys), 100)):
+            resp = ddb.batch_get_item(
+                RequestItems={'Orders': {'Keys': chunk}}
+            )
+  - title: Cache idempotent describe-style calls
+    likelihood: high
+    body: |
+      `DescribeTable`, `DescribeInstances`, `GetCallerIdentity`, `ListBuckets` rarely change. Cache them in-memory for 5-60 minutes. A long-running Lambda calling `DescribeTable` once per invocation can cut its API quota usage by 99%.
+  - title: Request a service quota increase
+    likelihood: medium
+    body: |
+      Service Quotas console → find the quota → request increase. Approval is usually within hours for routine bumps. Some hard limits (e.g., STS GetSessionToken) cannot be raised — for those, the fix is architectural (cache credentials, switch to `AssumeRoleWithWebIdentity`, etc.).
+  - title: Add jitter to your own retries
+    likelihood: medium
+    body: |
+      If you've wrapped the SDK with custom retry logic, make sure you have full jitter (random sleep between 0 and the backoff window) — not "exponential backoff" alone. Without jitter, all your clients retry in lockstep.
+    code:
+      language: python
+      filename: retry.py
+      code: |
+        import random, time
+
+        def with_jitter(call, max_attempts=6):
+            for attempt in range(max_attempts):
+                try:
+                    return call()
+                except ClientError as e:
+                    if e.response['Error']['Code'] != 'ThrottlingException':
+                        raise
+                    if attempt == max_attempts - 1:
+                        raise
+                    backoff = min(20, 2 ** attempt)
+                    time.sleep(random.uniform(0, backoff))
+detection: |
+  Most AWS services emit CloudWatch metrics for throttled requests (e.g., DynamoDB `ThrottledRequests`, Lambda `Throttles`, API Gateway `4XXError`). Alarm on a sustained throttle rate over 1% of total requests in a 5-minute window. Cross-reference with Service Quotas usage metrics to know which limit you're hitting.
+related:
+  - access-denied-exception-aws
+  - no-such-bucket-aws
+  - rate-limit-exceeded-openai
+  - 403-rate-limit-github
+  - too-many-requests-aws
+relatedHttp: 429
+relatedGuide: handling-rate-limits
+faq:
+  - q: Why does ThrottlingException return HTTP 400 instead of 429?
+    a: 'Historical reasons. AWS classified throttling as a client error before 429 was widely standardised, and changing the status code now would break millions of SDK clients. Some newer services (API Gateway, Cognito) do return 429. Always check the error `Code` field, not the HTTP status, to detect throttling.'
+  - q: 'What''s the difference between ThrottlingException and ProvisionedThroughputExceededException?'
+    a: '`ThrottlingException` is API-level throttling (control-plane calls like DescribeTable). `ProvisionedThroughputExceededException` is data-plane throttling on DynamoDB tables that have provisioned capacity. Both have similar fixes but different quotas — the latter is fixed by raising RCU/WCU or switching to on-demand.'
+  - q: Does the SDK automatically retry ThrottlingException?
+    a: 'Yes, by default. Every AWS SDK retries throttled calls with exponential backoff. The default is usually 3 retries; for production workloads, raise to 8-10 with adaptive mode. If you''re still seeing the error after retries, the throttling is sustained, not bursty.'
+  - q: I batched my calls but still get throttled. What now?
+    a: 'Batching reduces request count but not always token consumption. DynamoDB BatchWriteItem still consumes WCUs per item written. Check whether your bottleneck is request count (API quota) or capacity (RCU/WCU). The fix differs: request count → batch + cache; capacity → raise provisioned, switch to on-demand, or shard.'
+  - q: Can I use API Gateway in front of AWS APIs to absorb throttling?
+    a: 'Not really — API Gateway forwards calls one-to-one. The pattern you want is a queue (SQS) or stream (Kinesis) in front of a Lambda worker that respects the downstream rate limit. Add SQS visibility timeout and DLQ for poison messages.'
+  - q: 'Why does my Lambda throttle on STS GetCallerIdentity?'
+    a: 'STS has very low default quotas (e.g., 5,000 RPS per account region for AssumeRole). Lambda containers cache credentials, but if you create a new boto3 client per invocation in a high-concurrency Lambda, you can saturate STS. Move client creation outside the handler so it''s reused across invocations on the same container.'
+  - q: Does ThrottlingException count toward my AWS bill?
+    a: 'Throttled requests are not billed (no work was done), but they count toward your CloudWatch error metrics, which can flow into custom metric billing. They do consume some networking — usually negligible — and can trigger downstream retry costs from your own infrastructure.'
+  - q: How do I see my current AWS API quota usage?
+    a: 'Service Quotas console shows configured quotas; CloudWatch `AWS/Usage` namespace shows real-time consumption for many services. For the most precise data, enable AWS X-Ray on the calling service — it tags every throttled call so you can see exactly which API is the bottleneck.'
+escalate: |
+  Open an AWS Support case if (a) Service Quotas console shows headroom but you're still throttled (likely a hidden hot-partition limit), (b) a region-wide service event is masquerading as throttling, or (c) you need an emergency quota raise mid-incident. Provide the AWS request ID from the failing response — it lets support trace the exact bucket that throttled you.
+languages:
+  - python
+  - javascript
+  - go
+  - java
+keywords:
+  - aws throttlingexception
+  - aws rate exceeded
+  - aws api throttling
+  - boto3 throttlingexception
+  - aws sdk retry backoff
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`ThrottlingException` is the AWS-wide signal that you're calling an API faster than your account is allowed to. Despite returning HTTP 400 (a quirk of AWS history), it functions exactly like a 429 — back off, retry, and consider whether your access pattern is the real problem. The default SDK retry handles transient bursts; sustained throttling means architectural change is needed.
+
+A useful mental model: every AWS API has a token bucket per account per region. Each call consumes a token; tokens refill at the sustained rate. A burst empties the bucket; once empty, every call throttles until tokens refill. Your job is to keep average consumption well under the refill rate and your bursts under the bucket size.

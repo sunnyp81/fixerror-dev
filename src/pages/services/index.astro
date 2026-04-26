@@ -1,0 +1,89 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import { canonical } from '../../lib/seo';
+import { breadcrumbSchema, collectionPageSchema } from '../../lib/schema';
+
+const services = (await getCollection('services')).sort((a, b) =>
+  a.data.name.localeCompare(b.data.name),
+);
+const errors = await getCollection('errors');
+const countByService = errors.reduce<Record<string, number>>((acc, e) => {
+  if (!e.data.noindex) acc[e.data.service] = (acc[e.data.service] || 0) + 1;
+  return acc;
+}, {});
+
+const byCategory = services.reduce<Record<string, typeof services>>((acc, s) => {
+  (acc[s.data.category] ||= []).push(s);
+  return acc;
+}, {});
+
+const path = '/services/';
+const title = 'All Services — fixerror.dev';
+const description = `Browse error catalogues for ${services.length} APIs, frameworks, languages, and infrastructure tools. Plain-English fixes for every code.`;
+
+const jsonLd = [
+  breadcrumbSchema([
+    { name: 'Home', url: '/' },
+    { name: 'Services', url: path },
+  ]),
+  collectionPageSchema({
+    name: title,
+    description,
+    url: canonical(path),
+    items: services.map((s) => ({ name: s.data.name, url: `/${s.data.id}/` })),
+  }),
+];
+
+const categoryLabels: Record<string, string> = {
+  payments: 'Payments',
+  cloud: 'Cloud infrastructure',
+  developer: 'Developer platforms',
+  ai: 'AI APIs',
+  deployment: 'Deployment',
+  cdn: 'CDN & edge',
+  communications: 'Communications',
+  commerce: 'Commerce',
+  identity: 'Identity & auth',
+  backend: 'Backend platforms',
+  database: 'Databases',
+  infrastructure: 'Infrastructure',
+  language: 'Languages',
+  framework: 'Frameworks',
+};
+---
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={[{ name: 'Home', url: '/' }, { name: 'Services' }]} />
+    <header class="mb-10">
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight mb-3">All services</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)] max-w-3xl">
+        Error catalogues for {services.length} APIs, frameworks, languages, and infrastructure tools.
+      </p>
+    </header>
+
+    {Object.entries(byCategory).map(([cat, items]) => (
+      <section class="mb-10">
+        <h2 class="text-xl font-semibold tracking-tight mb-4">{categoryLabels[cat] ?? cat}</h2>
+        <ul class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {items.map((s) => (
+            <li>
+              <a
+                href={`/${s.data.id}/`}
+                class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)] transition-colors h-full"
+              >
+                <div class="flex items-baseline justify-between gap-2 mb-1">
+                  <div class="font-semibold">{s.data.name}</div>
+                  <span class="text-xs font-mono text-[color:var(--color-text-dim)]">{countByService[s.data.id] ?? 0}</span>
+                </div>
+                <div class="text-xs text-[color:var(--color-text-muted)] mb-2">{s.data.tagline}</div>
+                <div class="text-sm text-[color:var(--color-text-muted)] line-clamp-2">{s.data.description}</div>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+  </div>
+</BaseLayout>

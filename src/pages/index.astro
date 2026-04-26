@@ -1,0 +1,145 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { SITE, canonical } from '../lib/seo';
+import { websiteSchema } from '../lib/schema';
+
+const errors = (await getCollection('errors')).filter((e) => !e.data.noindex);
+const services = await getCollection('services');
+const codes = await getCollection('httpCodes');
+const guides = (await getCollection('guides')).slice(0, 6);
+
+const popular = errors
+  .filter((e) => e.data.quality === 'curated')
+  .sort((a, b) => (b.data.severity === 'critical' ? 1 : 0) - (a.data.severity === 'critical' ? 1 : 0))
+  .slice(0, 12);
+
+const errorCodes = codes.filter((c) => c.data.isError).slice(0, 18);
+
+const path = '/';
+const title = `${SITE.name} — Fix any error. Fast.`;
+const description = SITE.description;
+
+const jsonLd = [websiteSchema()];
+
+const totalErrors = errors.length;
+const totalServices = services.length;
+const totalCodes = codes.length;
+---
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <section class="border-b border-[color:var(--color-border)]">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-16 md:py-24">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] text-xs font-mono mb-6">
+        <span class="w-1.5 h-1.5 rounded-full bg-[color:var(--color-success)]"></span>
+        <span class="text-[color:var(--color-text-muted)]">{totalErrors.toLocaleString()} errors • {totalServices} services • {totalCodes} HTTP codes</span>
+      </div>
+      <h1 class="text-4xl md:text-6xl font-bold tracking-tight leading-tight">
+        Fix any error. <span class="text-[color:var(--color-accent)]">Fast.</span>
+      </h1>
+      <p class="text-lg md:text-xl text-[color:var(--color-text-muted)] mt-5 max-w-2xl leading-relaxed">
+        Plain-English causes, ranked fixes, and working code for every API, HTTP, framework, and language error you'll hit in production.
+      </p>
+      <form action="/search" method="get" class="mt-8 flex items-center bg-[color:var(--color-bg-card)] border border-[color:var(--color-border-strong)] rounded-lg px-4 py-3 max-w-2xl focus-within:border-[color:var(--color-accent)]">
+        <span class="text-[color:var(--color-text-dim)] font-mono mr-3 text-lg">/</span>
+        <input
+          type="search"
+          name="q"
+          placeholder="card_declined, ECONNREFUSED, hydration failed..."
+          class="bg-transparent outline-none flex-1 text-base placeholder:text-[color:var(--color-text-dim)]"
+          autocomplete="off"
+        />
+        <button type="submit" class="ml-3 text-sm font-medium px-4 py-1.5 rounded-md bg-[color:var(--color-accent)] text-[color:var(--color-bg)] hover:bg-[color:var(--color-accent-hover)]">
+          Search
+        </button>
+      </form>
+      <div class="mt-4 flex flex-wrap gap-2 text-xs">
+        <span class="text-[color:var(--color-text-dim)] mr-1">Popular:</span>
+        {popular.slice(0, 6).map((e) => (
+          <a href={`/${e.data.service}/${e.data.slug}/`} class="font-mono px-2 py-1 rounded-md border border-[color:var(--color-border)] hover:border-[color:var(--color-accent)] text-[color:var(--color-text-muted)] hover:text-[color:var(--color-accent)]">
+            {e.data.code}
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
+    <div class="flex items-baseline justify-between mb-6">
+      <h2 class="text-2xl font-bold tracking-tight">Errors by service</h2>
+      <a href="/services/" class="text-sm text-[color:var(--color-accent)] hover:underline">View all {totalServices} →</a>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+      {services.slice(0, 16).map((s) => {
+        const count = errors.filter((e) => e.data.service === s.data.id).length;
+        return (
+          <a href={`/${s.data.id}/`} class="block rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)] transition-colors">
+            <div class="flex items-baseline justify-between mb-1">
+              <div class="font-semibold">{s.data.name}</div>
+              {count > 0 && <span class="text-xs font-mono text-[color:var(--color-text-dim)]">{count}</span>}
+            </div>
+            <div class="text-xs text-[color:var(--color-text-muted)] line-clamp-2">{s.data.tagline}</div>
+          </a>
+        );
+      })}
+    </div>
+  </section>
+
+  <section class="border-y border-[color:var(--color-border)] bg-[color:var(--color-bg-elev)]">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
+      <div class="flex items-baseline justify-between mb-6">
+        <h2 class="text-2xl font-bold tracking-tight">HTTP status codes</h2>
+        <a href="/http/" class="text-sm text-[color:var(--color-accent)] hover:underline">View all {totalCodes} →</a>
+      </div>
+      <div class="grid grid-cols-3 md:grid-cols-6 lg:grid-cols-9 gap-2">
+        {errorCodes.map((c) => (
+          <a href={`/http/${c.data.code}/`} class="block text-center py-3 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] hover:border-[color:var(--color-accent)] hover:bg-[color:var(--color-bg-card)]">
+            <div class="font-mono font-bold text-lg text-[color:var(--color-accent)]">{c.data.code}</div>
+            <div class="text-[10px] uppercase tracking-wider text-[color:var(--color-text-dim)] mt-0.5 px-1 line-clamp-1">{c.data.name}</div>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {popular.length > 0 && (
+    <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
+      <h2 class="text-2xl font-bold tracking-tight mb-6">Popular errors</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {popular.map((e) => {
+          const s = services.find((sv) => sv.data.id === e.data.service);
+          return (
+            <a href={`/${e.data.service}/${e.data.slug}/`} class="block rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)]">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="text-xs font-mono uppercase tracking-wider text-[color:var(--color-text-dim)]">{s?.data.name}</span>
+                {e.data.httpStatus && <span class="text-xs font-mono text-[color:var(--color-text-dim)]">• {e.data.httpStatus}</span>}
+              </div>
+              <code class="text-sm text-[color:var(--color-accent)] block mb-1">{e.data.code}</code>
+              <div class="text-sm text-[color:var(--color-text)] mb-2">{e.data.plainTitle}</div>
+              <div class="text-xs text-[color:var(--color-text-muted)] line-clamp-2">{e.data.tldrCause}</div>
+            </a>
+          );
+        })}
+      </div>
+    </section>
+  )}
+
+  {guides.length > 0 && (
+    <section class="border-t border-[color:var(--color-border)] bg-[color:var(--color-bg-elev)]">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
+        <div class="flex items-baseline justify-between mb-6">
+          <h2 class="text-2xl font-bold tracking-tight">Guides</h2>
+          <a href="/guide/" class="text-sm text-[color:var(--color-accent)] hover:underline">All guides →</a>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {guides.map((g) => (
+            <a href={`/guide/${g.data.slug}/`} class="block rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-4 hover:border-[color:var(--color-accent)]">
+              <div class="text-xs uppercase tracking-wider text-[color:var(--color-text-dim)] mb-1">{g.data.category}</div>
+              <div class="font-semibold mb-2">{g.data.title}</div>
+              <div class="text-sm text-[color:var(--color-text-muted)] line-clamp-2">{g.data.description}</div>
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+  )}
+</BaseLayout>

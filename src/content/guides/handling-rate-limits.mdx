@@ -1,0 +1,146 @@
+---
+title: How to Handle Rate Limits Without Losing Requests
+slug: handling-rate-limits
+description: Rate limits exist for good reasons — but losing requests to them is avoidable. This guide covers detection, retry strategy, client-side throttling, and the patterns production systems use.
+category: Reliability
+keywords:
+  - rate limit
+  - "429"
+  - exponential backoff
+  - token bucket
+  - retry strategy
+relatedErrors:
+  - rate-limit-exceeded
+  - too-many-requests
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+Rate limits are HTTP 429 responses returned when you've sent too many requests in a window. The naive reaction — retry instantly — is the worst response. This guide walks through the layered approach production systems use: detection, retry-after honoring, exponential backoff with jitter, client-side throttling, and queue-based smoothing.
+
+## Why rate limits exist
+
+API providers cap request rate to protect their infrastructure (preventing one customer from starving others), to enforce billing tiers, and to push abusive traffic to higher costs. Limits come in three shapes:
+
+1. **Request-based**: N requests per minute (Stripe: 100 RPS read, 100 RPS write)
+2. **Token-based**: N tokens per minute (OpenAI: 30k TPM on gpt-4o tier 1)
+3. **Cost-based**: N abstract "cost units" per second (Shopify GraphQL: 50 points/sec leak from 1000-point bucket)
+
+The shape matters because the fix differs. Hitting RPM is solved by request batching and concurrency caps. Hitting TPM means trimming prompts or splitting workloads. Hitting cost limits means re-shaping queries.
+
+## Detection: read the headers
+
+Almost every provider returns rate-limit headers on *every* response, not just 429s. Log these:
+
+```
+X-RateLimit-Limit: 500            # cap
+X-RateLimit-Remaining: 482        # left in window
+X-RateLimit-Reset: 1714123456     # unix ts when window resets
+Retry-After: 12                   # seconds to wait, on 429s
+```
+
+Track `Remaining / Limit` ratio over time. When it consistently drops below 20% under normal load, you're one traffic spike away from 429s. Alert on this *before* you start hitting limits in production.
+
+## Retry strategy: exponential backoff with jitter
+
+When you do hit a 429, the standard retry algorithm is exponential backoff with full jitter:
+
+```python
+import random
+import time
+
+def backoff_delay(attempt: int, base: float = 1.0, cap: float = 60.0) -> float:
+    """Full jitter backoff: random between 0 and min(cap, base * 2^attempt)."""
+    return random.uniform(0, min(cap, base * (2 ** attempt)))
+
+def retry_with_backoff(call, max_attempts=5):
+    for attempt in range(max_attempts):
+        try:
+            return call()
+        except RateLimitError as e:
+            if attempt == max_attempts - 1:
+                raise
+            # Honour Retry-After if present, else use backoff
+            wait = float(e.retry_after) if e.retry_after else backoff_delay(attempt)
+            time.sleep(wait)
+```
+
+**Why jitter matters**: without it, every client that fails at the same time also retries at the same time. The "thundering herd" hammers the API the moment its capacity recovers, triggering another wave of 429s. Jitter spreads retries across the window.
+
+## Client-side throttling: don't fail in the first place
+
+Reactive retries fix individual failures. Proactive throttling prevents them. Use a token bucket on your side, sized to slightly under the provider's limit:
+
+```javascript
+import { TokenBucket } from 'limiter';
+
+// 90% of OpenAI tier-1 RPM = 450 req/min = 7.5 req/sec
+const bucket = new TokenBucket({
+  bucketSize: 10,        // small burst allowance
+  tokensPerInterval: 7,  // sustained rate
+  interval: 'second',
+});
+
+async function callApi(payload) {
+  await bucket.removeTokens(1);
+  return openai.chat.completions.create(payload);
+}
+```
+
+This converts rate-limit problems into latency problems — much better UX. Requests queue instead of failing, and you control the queue.
+
+## Queue-based smoothing for bursts
+
+For workloads that aren't latency-sensitive (analytics enrichment, content moderation, batch translation), queue requests and process at a fixed rate. Use Redis sorted sets with timestamps, BullMQ, SQS, or just a database table with a worker.
+
+For OpenAI specifically, switch non-realtime workloads to the Batch API: 50% off and a separate, much higher rate limit. Latency is up to 24h but throughput is dramatically higher.
+
+## Per-route rate limits in your own API
+
+If you're the one being rate-limited *by* — i.e., you operate an API — return 429 with the same headers third parties expect:
+
+```javascript
+// Express middleware example
+const rateLimit = require('express-rate-limit');
+
+app.use('/api/', rateLimit({
+  windowMs: 60_000,        // 1 minute
+  max: 60,                 // 60 requests per minute
+  standardHeaders: true,   // sets RateLimit-* headers
+  legacyHeaders: false,    // skip X-RateLimit-* (legacy)
+  message: { error: 'rate_limit_exceeded' },
+}));
+```
+
+Choose between fixed-window (simple, has burst issues at boundaries), sliding-window (fairer, more expensive), or token bucket (best for bursty traffic). Pick by your traffic shape, not by what's easiest to implement.
+
+## Common rate-limit anti-patterns
+
+**Retrying immediately**: doubles your problem and accelerates account-level enforcement.
+
+**Retrying forever**: a permanent rate limit issue (wrong tier, bug in caller) becomes invisible if you retry indefinitely. Cap attempts and surface the failure.
+
+**Ignoring `Retry-After`**: you're guessing when the provider has told you the answer. Always honour it.
+
+**Sharing one client across many tenants without scoping**: one noisy tenant exhausts the limit for everyone. Use per-tenant token buckets or rate-limit at your own API edge.
+
+**Counting only successful requests**: 429s themselves consume your concurrent connection budget. Treat them as costing the same as 200s when sizing throttles.
+
+## Per-provider notes
+
+- **Stripe**: hard limits at 100 RPS read, 100 RPS write per account. Honour `Stripe-Should-Retry: true` header.
+- **OpenAI**: tier-based RPM and TPM. Tier upgrades happen automatically based on cumulative spend + 7-day waits.
+- **GitHub**: 5000/hr authenticated, 60/hr anonymous. Secondary rate limits on rapid sequential requests (no published number — back off aggressively).
+- **Shopify GraphQL**: 1000-point bucket, leaks 50/sec. Read query cost from `extensions.cost` and stay under leak rate.
+- **Anthropic**: tier-based RPM, TPM, and *input tokens per minute* (ITPM). Long context inputs hit ITPM quickly.
+
+## Summary checklist
+
+- [ ] Log `X-RateLimit-*` headers on every response, not just 429s.
+- [ ] Alert when `Remaining/Limit` drops below 20% sustained.
+- [ ] Always honour `Retry-After` if present.
+- [ ] Use full jitter in your backoff (random 0..delay, not fixed).
+- [ ] Cap retry attempts (typically 3–5).
+- [ ] Add a client-side token bucket sized to ~90% of the provider limit.
+- [ ] Queue non-realtime work; consider Batch APIs.
+- [ ] If you operate an API, return RFC-compliant 429s with headers.

@@ -1,0 +1,36 @@
+---
+const services = [
+  { id: 'stripe', name: 'Stripe' },
+  { id: 'aws', name: 'AWS' },
+  { id: 'openai', name: 'OpenAI' },
+  { id: 'github', name: 'GitHub' },
+  { id: 'postgres', name: 'Postgres' },
+  { id: 'nextjs', name: 'Next.js' },
+];
+const path = Astro.url.pathname;
+---
+<header class="sticky top-0 z-50 backdrop-blur-md bg-[color:var(--color-bg)]/80 border-b border-[color:var(--color-border)]">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between gap-4">
+    <a href="/" class="flex items-center gap-2 font-mono text-sm font-semibold tracking-tight">
+      <span class="inline-block w-2 h-2 rounded-full bg-[color:var(--color-danger)]"></span>
+      <span class="text-[color:var(--color-text)]">fixerror</span><span class="text-[color:var(--color-text-dim)]">.dev</span>
+    </a>
+    <nav class="hidden md:flex items-center gap-1 text-sm">
+      <a href="/http/" class:list={["px-3 py-1.5 rounded-md hover:bg-[color:var(--color-bg-card)] hover:text-[color:var(--color-text)]", path.startsWith('/http') ? 'text-[color:var(--color-text)]' : 'text-[color:var(--color-text-muted)]']}>HTTP codes</a>
+      <a href="/services/" class:list={["px-3 py-1.5 rounded-md hover:bg-[color:var(--color-bg-card)] hover:text-[color:var(--color-text)]", path.startsWith('/services') ? 'text-[color:var(--color-text)]' : 'text-[color:var(--color-text-muted)]']}>Services</a>
+      <a href="/guide/" class:list={["px-3 py-1.5 rounded-md hover:bg-[color:var(--color-bg-card)] hover:text-[color:var(--color-text)]", path.startsWith('/guide') ? 'text-[color:var(--color-text)]' : 'text-[color:var(--color-text-muted)]']}>Guides</a>
+      <a href="/compare/" class:list={["px-3 py-1.5 rounded-md hover:bg-[color:var(--color-bg-card)] hover:text-[color:var(--color-text)]", path.startsWith('/compare') ? 'text-[color:var(--color-text)]' : 'text-[color:var(--color-text-muted)]']}>Compare</a>
+      <a href="/glossary/" class:list={["px-3 py-1.5 rounded-md hover:bg-[color:var(--color-bg-card)] hover:text-[color:var(--color-text)]", path.startsWith('/glossary') ? 'text-[color:var(--color-text)]' : 'text-[color:var(--color-text-muted)]']}>Glossary</a>
+    </nav>
+    <form action="/search" method="get" class="hidden sm:flex items-center bg-[color:var(--color-bg-card)] border border-[color:var(--color-border)] rounded-md px-2.5 py-1 text-sm w-56 focus-within:border-[color:var(--color-accent)]">
+      <span class="text-[color:var(--color-text-dim)] font-mono mr-2">/</span>
+      <input
+        type="search"
+        name="q"
+        placeholder="card_declined, ECONNREFUSED..."
+        class="bg-transparent outline-none flex-1 placeholder:text-[color:var(--color-text-dim)]"
+        autocomplete="off"
+      />
+    </form>
+  </div>
+</header>

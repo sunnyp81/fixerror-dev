@@ -1,0 +1,58 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Breadcrumb from '../components/Breadcrumb.astro';
+import { canonical } from '../lib/seo';
+import { breadcrumbSchema } from '../lib/schema';
+
+const terms = [
+  { term: 'Idempotency key', def: 'A unique value that ensures repeating a request has the same effect as making it once. Critical for safely retrying payment, write, and webhook delivery operations.' },
+  { term: 'Exponential backoff', def: 'A retry strategy where the wait between attempts doubles each time (e.g., 1s, 2s, 4s, 8s). Pair with jitter to avoid thundering herds.' },
+  { term: 'Jitter', def: 'Random variation added to retry delays so that many clients failing at once don\'t retry at the exact same moment. "Full jitter" picks a random value between 0 and the backoff.' },
+  { term: 'Circuit breaker', def: 'A pattern that stops calling a failing dependency after a threshold of errors, fails fast for a cooldown, then probes for recovery. Prevents cascading failures.' },
+  { term: 'Rate limit', def: 'A cap on how many requests a client can make in a window. Servers return HTTP 429 when exceeded, with X-RateLimit-* and Retry-After headers.' },
+  { term: 'Token bucket', def: 'Rate-limiting algorithm where requests consume tokens from a bucket that refills at a steady rate. Allows short bursts up to bucket capacity.' },
+  { term: 'Leaky bucket', def: 'Rate-limiting algorithm where requests pass through a bucket at a fixed leak rate. Smooths bursts to a steady rate.' },
+  { term: 'Webhook signature', def: 'An HMAC of the webhook body using a shared secret, sent in a header. Verify before trusting the payload — otherwise anyone can forge events.' },
+  { term: 'Optimistic concurrency', def: 'Update strategy that checks a version (ETag, version number) before writing. Rejects conflicting updates with 409 or 412 instead of locking.' },
+  { term: 'Stack trace', def: 'The list of function calls that led to an error. Read top-to-bottom from the error site, scanning for the topmost line in your own code.' },
+  { term: 'Hydration', def: 'Process where a JavaScript framework attaches event handlers to server-rendered HTML. Mismatch between server and client output causes hydration errors.' },
+  { term: 'Cold start', def: 'Latency added when a serverless function spins up a new container after being idle. Usually 100ms-2s; worse with large dependencies.' },
+  { term: 'Connection pool', def: 'A reusable set of database connections. Prevents the cost of opening a new connection per request, but bounded — running out triggers timeouts or 503s.' },
+  { term: 'Deadlock', def: 'Two or more transactions waiting for locks held by each other. Most databases auto-detect and abort one transaction; the loser must retry.' },
+  { term: 'Retryable error', def: 'A transient failure (network glitch, lock contention, capacity blip) that may succeed on a retry. Distinguish from fatal errors (validation, permission) which should not be retried.' },
+  { term: 'Cascade failure', def: 'When one service\'s failure overwhelms its callers, propagating the outage. Circuit breakers, timeouts, and bulkheads contain it.' },
+  { term: 'IAM policy', def: 'Identity and Access Management ruleset granting (or denying) actions on resources. AWS, GCP, and Azure each have their own policy languages.' },
+  { term: 'JWT', def: 'JSON Web Token — a signed credential carrying claims. Verify the signature, expiration, audience, and issuer before trusting it.' },
+  { term: 'CORS preflight', def: 'OPTIONS request a browser sends before a cross-origin request to check whether the server allows it. Failures are silent in app code but visible in DevTools.' },
+  { term: 'Backpressure', def: 'A mechanism for a slow consumer to signal "slow down" to a fast producer. Without it, queues grow unbounded and memory eventually blows.' },
+  { term: 'SLO / SLI / SLA', def: 'SLI = service level indicator (a metric, e.g. p99 latency). SLO = the target value of an SLI. SLA = a contractual SLO with consequences attached.' },
+  { term: 'Time-to-First-Byte (TTFB)', def: 'Time between request sent and first response byte received. Dominated by server processing time, queueing, and network distance.' },
+  { term: 'Eventual consistency', def: 'Read after write may not see the write immediately, but converges over time. Common in distributed systems; surprises developers used to relational ACID.' },
+  { term: 'Quota', def: 'A hard cap on resource usage (requests/day, GB stored, function invocations/month). Crossing it returns errors and may incur overage charges.' },
+];
+const path = '/glossary/';
+const title = 'Glossary — fixerror.dev';
+const description = 'Plain-English definitions of the error-handling and reliability terms you\'ll encounter while debugging.';
+
+const jsonLd = [breadcrumbSchema([{ name: 'Home', url: '/' }, { name: 'Glossary', url: path }])];
+---
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={[{ name: 'Home', url: '/' }, { name: 'Glossary' }]} />
+    <header class="mb-10">
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight mb-3">Glossary</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)]">
+        Plain-English definitions of the error-handling and reliability terms you'll encounter while debugging.
+      </p>
+    </header>
+
+    <dl class="space-y-6">
+      {terms.map((t) => (
+        <div class="border-l-2 border-[color:var(--color-border)] pl-4 py-1" id={t.term.toLowerCase().replace(/[^a-z0-9]+/g, '-')}>
+          <dt class="font-semibold text-[color:var(--color-text)] mb-1">{t.term}</dt>
+          <dd class="text-sm text-[color:var(--color-text-muted)] leading-relaxed">{t.def}</dd>
+        </div>
+      ))}
+    </dl>
+  </div>
+</BaseLayout>

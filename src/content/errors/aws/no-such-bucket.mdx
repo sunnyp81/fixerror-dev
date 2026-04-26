@@ -1,0 +1,142 @@
+---
+service: aws
+code: NoSuchBucket
+slug: no-such-bucket
+title: 'AWS Error: NoSuchBucket — S3 Bucket Does Not Exist (Cause + Fix)'
+plainTitle: S3 Bucket Does Not Exist
+httpStatus: 404
+category: not-found
+severity: high
+tldrCause: The S3 bucket name in your request does not exist in the region your client is calling. Either the name is misspelled, the bucket was deleted, or your client is pointed at the wrong region for a bucket that exists elsewhere.
+tldrFix: Verify the exact bucket name with `aws s3api head-bucket --bucket <name>`, confirm the region with `aws s3api get-bucket-location`, and rebuild your client with that explicit region. Bucket names are global but data lives in one region only.
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    An error occurred (NoSuchBucket) when calling the GetObject operation:
+    The specified bucket does not exist
+    <Error>
+      <Code>NoSuchBucket</Code>
+      <Message>The specified bucket does not exist</Message>
+      <BucketName>my-prod-bucket-eu</BucketName>
+      <RequestId>EXAMPLE123</RequestId>
+    </Error>
+  caption: "S3 returns NoSuchBucket as HTTP 404 with the bucket name echoed in the XML body."
+causes:
+  - title: Typo or stale bucket name in config
+    body: "Most NoSuchBucket errors are mundane — env var typo, hardcoded name from a deleted resource, Terraform state pointing at a destroyed bucket. Always print the bucket name your code is actually using before assuming a deeper issue."
+  - title: Wrong region client for the bucket
+    body: "S3 bucket names are globally unique but data is regional. A client built with `region_name='us-east-1'` calling a bucket in `eu-west-2` may get NoSuchBucket (newer SDKs auto-redirect; older or misconfigured ones do not). Always pin the region explicitly."
+  - title: Bucket was recently deleted
+    body: "After deletion, the bucket name is reserved for a grace period (up to a few hours) and then released. Calls during the grace period return NoSuchBucket; calls after release may return AccessDenied if someone else recreated the name."
+  - title: Path-style vs virtual-hosted-style addressing mismatch
+    body: "Buckets with dots in the name (`my.bucket.com`) break virtual-hosted-style HTTPS due to wildcard cert mismatch. Some SDKs fall back to path-style; others fail with NoSuchBucket. Use `s3v4` and force path-style addressing for dotted names."
+  - title: Cross-account access without the right ARN
+    body: "Calling a bucket in another account without specifying its full ARN can resolve to your own account's namespace. If your account has no bucket by that name, you get NoSuchBucket — even though the bucket exists in the partner account."
+fixes:
+  - title: Confirm the bucket exists and find its region
+    likelihood: high
+    body: |
+      `head-bucket` returns 200 if you have access, 403 if it exists but you can't see it, and 404 if it truly doesn't exist. `get-bucket-location` then returns the region. Run both before changing code.
+    code:
+      language: bash
+      filename: check.sh
+      code: |
+        # Does it exist at all?
+        aws s3api head-bucket --bucket my-prod-bucket-eu
+
+        # What region is it in?
+        aws s3api get-bucket-location --bucket my-prod-bucket-eu
+        # { "LocationConstraint": "eu-west-2" }
+
+        # List your account's buckets to confirm spelling
+        aws s3 ls
+  - title: Pin the region in your S3 client
+    likelihood: high
+    body: |
+      Don't rely on default region resolution. Build your S3 client with the bucket's exact region, especially in cross-region or multi-region workloads.
+    code:
+      language: python
+      filename: s3_client.py
+      code: |
+        import boto3
+
+        # Wrong: client default region may not match the bucket
+        # s3 = boto3.client('s3')
+
+        # Right: pin to the bucket's region
+        s3 = boto3.client('s3', region_name='eu-west-2')
+
+        obj = s3.get_object(Bucket='my-prod-bucket-eu', Key='config.json')
+  - title: Use force_path_style for dotted bucket names
+    likelihood: medium
+    body: |
+      Buckets like `my.site.com` need path-style addressing because HTTPS wildcard certs don't cover three-label subdomains. Newer SDKs handle this automatically; explicitly force it if you're seeing NoSuchBucket on a dotted name.
+    code:
+      language: python
+      filename: s3_path_style.py
+      code: |
+        import boto3
+        from botocore.client import Config
+
+        s3 = boto3.client(
+            's3',
+            region_name='us-east-1',
+            config=Config(s3={'addressing_style': 'path'}, signature_version='s3v4'),
+        )
+  - title: For cross-account access, use the access point ARN
+    likelihood: medium
+    body: |
+      S3 Access Points let you reach a bucket in another account by ARN, sidestepping global-namespace ambiguity. The ARN includes the owning account and region, so the client can never silently target the wrong account.
+  - title: Print the exact request URL when debugging
+    likelihood: low
+    body: |
+      Enable SDK debug logging to see the URL the client actually built. Misformatted URLs (double slashes, region prefix in the host) are a frequent root cause that's invisible from the application code.
+detection: |
+  Track NoSuchBucket separately from other 4xx S3 errors. A spike on a single bucket usually means a deletion event in another account. A spike across many buckets in one region usually means a misconfigured deploy pinned the wrong region. CloudTrail `s3:DeleteBucket` events let you correlate quickly.
+related:
+  - access-denied-exception-aws
+  - throttling-exception-aws
+  - signature-does-not-match-aws
+  - region-disabled-aws
+  - bucket-already-exists-aws
+relatedHttp: 404
+relatedGuide: aws-s3-debugging
+faq:
+  - q: What's the difference between NoSuchBucket and AccessDenied on S3?
+    a: 'NoSuchBucket = the bucket doesn''t exist (404). AccessDenied = the bucket exists but your IAM doesn''t allow you to see it (403). S3 prefers AccessDenied over NoSuchBucket when there''s any ambiguity, to avoid leaking bucket existence to unauthorised callers — which is why the same bucket can return either error to different principals.'
+  - q: My bucket exists but I get NoSuchBucket from a Lambda. Why?
+    a: 'Most likely a region mismatch — your Lambda runs in `us-east-1` and built a default-region S3 client, but the bucket is in `eu-west-2`. Newer SDK versions auto-redirect, but only after one extra round-trip. Pin the region explicitly to fix and to save the latency hit.'
+  - q: I just created a bucket but get NoSuchBucket immediately after. Is this a race?
+    a: 'Yes. S3 bucket creation is eventually consistent across regions for a few seconds. Add a short retry loop with `head_bucket` polling after CreateBucket. Once head_bucket returns 200, GetObject/PutObject are safe.'
+  - q: Why do I see NoSuchBucket only when accessing my bucket from another AWS account?
+    a: 'Cross-account S3 calls go through your account''s namespace by default. If your account has no bucket by that exact name, you get NoSuchBucket even though the bucket exists in the partner account. Use the partner''s S3 Access Point ARN, or pass the full bucket ARN where the SDK accepts it.'
+  - q: Can I recreate a bucket with the same name after deleting it?
+    a: 'Eventually yes — bucket names go through a release-and-reclaim cycle that can take a few hours. During the grace period the name is reserved and DeleteBucket → CreateBucket with the same name will fail. After release, anyone (including you) can claim it; race conditions are rare but possible.'
+  - q: 'Does NoSuchBucket count toward my S3 request charges?'
+    a: 'No. S3 only charges for requests that touch existing objects. 404 NoSuchBucket and AccessDenied responses are free. They do count toward your overall request rate for throttling-quota purposes.'
+  - q: How do I detect a bucket-name typo in CI before it ships to production?
+    a: 'Add a smoke test in your deploy pipeline that runs `aws s3api head-bucket` against every bucket name your code references. Fail the deploy if any returns 404. Combined with infra-as-code (Terraform/CDK), this catches both typos and accidentally-deleted buckets.'
+  - q: Why do I get NoSuchBucket from a CloudFront-fronted bucket?
+    a: 'Because CloudFront passes the request to S3 with whatever bucket name it has configured as the origin. If you renamed or deleted the bucket without updating CloudFront, every distribution request gets NoSuchBucket. Edit the CloudFront origin to the new bucket name and invalidate the cache.'
+escalate: |
+  Escalate to AWS Support if (a) `aws s3api head-bucket` from the AWS CLI on the same machine returns 200 but your SDK call returns NoSuchBucket — that's a SDK bug or signing issue worth a ticket, (b) the bucket region returned by `get-bucket-location` differs from what you can see in the console, or (c) bucket-name reclaim is taking more than 24 hours after a delete.
+languages:
+  - python
+  - javascript
+  - go
+  - java
+keywords:
+  - aws nosuchbucket
+  - s3 bucket does not exist
+  - s3 404 error
+  - aws s3 wrong region
+  - boto3 nosuchbucket
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`NoSuchBucket` is S3 saying "I cannot find a bucket by this exact name in the region you queried." It's almost always one of three things: a typo, a region mismatch, or a bucket that was deleted (often by a Terraform run or a manual cleanup). The XML response includes the bucket name S3 saw, which is the single most useful clue for debugging — copy it and grep your config.
+
+A debugging tip: S3's "global namespace, regional data" model trips up almost every team eventually. Bucket names are unique worldwide, but the data and the API endpoint are regional. A bucket named `acme-prod-uploads` in `eu-west-2` cannot be reached by a US-East-1 client without an explicit redirect — and the failure mode is NoSuchBucket, not a clear region error. Pin region explicitly in every long-lived S3 client.

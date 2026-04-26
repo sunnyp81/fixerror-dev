@@ -1,0 +1,132 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import { canonical } from '../../lib/seo';
+import { breadcrumbSchema, techArticleSchema, collectionPageSchema } from '../../lib/schema';
+
+export async function getStaticPaths() {
+  const codes = await getCollection('httpCodes');
+  return codes.map((c) => ({
+    params: { code: String(c.data.code) },
+    props: { entry: c },
+  }));
+}
+
+const { entry } = Astro.props;
+const data = entry.data;
+
+const allErrors = await getCollection('errors');
+const services = await getCollection('services');
+
+const matchingErrors = allErrors
+  .filter((e) => e.data.httpStatus === data.code && !e.data.noindex)
+  .sort((a, b) => a.data.service.localeCompare(b.data.service));
+
+const errorsByService = matchingErrors.reduce<Record<string, typeof matchingErrors>>((acc, e) => {
+  (acc[e.data.service] ||= []).push(e);
+  return acc;
+}, {});
+
+const path = `/http/${data.code}/`;
+const url = canonical(path);
+const title = `HTTP ${data.code} ${data.name}: Cause, Fix & Examples — fixerror.dev`;
+const description = `HTTP ${data.code} ${data.name}: ${data.description.slice(0, 100)}...`;
+
+const breadcrumb = [
+  { name: 'Home', url: '/' },
+  { name: 'HTTP codes', url: '/http/' },
+  { name: `${data.code} ${data.name}` },
+];
+
+const jsonLd = [
+  breadcrumbSchema(breadcrumb),
+  techArticleSchema({
+    headline: title,
+    description,
+    url,
+    keywords: [`HTTP ${data.code}`, data.name, 'HTTP status code'],
+    about: `HTTP ${data.code}`,
+  }),
+  collectionPageSchema({
+    name: `${data.name} across services`,
+    description: `Services that return HTTP ${data.code}`,
+    url,
+    items: matchingErrors.map((e) => {
+      const s = services.find((sv) => sv.data.id === e.data.service);
+      return {
+        name: `${s?.data.name ?? e.data.service}: ${e.data.code}`,
+        url: `/${e.data.service}/${e.data.slug}/`,
+      };
+    }),
+  }),
+];
+
+const isError = data.isError;
+const tone = data.category === '2xx' ? 'success' : data.category === '3xx' ? 'warn' : 'danger';
+---
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={breadcrumb} />
+
+    <header class="mb-8">
+      <div class="flex items-center gap-3 mb-3">
+        <code class:list={[
+          "font-mono text-3xl font-bold px-3 py-1 rounded-md border",
+          tone === 'success' && 'text-[color:var(--color-success)] border-[color:var(--color-success)]/30 bg-[color:var(--color-success)]/5',
+          tone === 'warn' && 'text-[color:var(--color-warn)] border-[color:var(--color-warn)]/30 bg-[color:var(--color-warn)]/5',
+          tone === 'danger' && 'text-[color:var(--color-danger)] border-[color:var(--color-danger)]/30 bg-[color:var(--color-danger)]/5',
+        ]}>{data.code}</code>
+        <span class="text-xs font-mono px-2 py-0.5 rounded-md bg-[color:var(--color-bg-card)] border border-[color:var(--color-border)] text-[color:var(--color-text-muted)]">{data.category}</span>
+        <span class="text-xs font-mono text-[color:var(--color-text-dim)]">{data.rfc}</span>
+      </div>
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight">{data.name}</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)] mt-3 leading-relaxed">{data.description}</p>
+    </header>
+
+    <article class="prose">
+      <h2 id="what-is">What HTTP {data.code} means</h2>
+      <p>{data.longDescription}</p>
+
+      {data.typicalCauses.length > 0 && (
+        <>
+          <h2 id="typical-causes">Typical causes</h2>
+          <ul>
+            {data.typicalCauses.map((c) => (<li>{c}</li>))}
+          </ul>
+        </>
+      )}
+    </article>
+
+    {Object.keys(errorsByService).length > 0 && (
+      <section class="mt-12">
+        <h2 class="text-xl font-semibold tracking-tight mb-4">{data.code} across services</h2>
+        <p class="text-sm text-[color:var(--color-text-muted)] mb-6">
+          How {matchingErrors.length} different errors map to HTTP {data.code} across the services we cover.
+        </p>
+        <div class="space-y-6">
+          {Object.entries(errorsByService).map(([sid, items]) => {
+            const s = services.find((sv) => sv.data.id === sid);
+            return (
+              <div>
+                <h3 class="text-sm font-semibold text-[color:var(--color-text-muted)] uppercase tracking-wider mb-2">
+                  <a href={`/${sid}/`} class="hover:text-[color:var(--color-accent)]">{s?.data.name ?? sid}</a>
+                </h3>
+                <ul class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {items.map((e) => (
+                    <li>
+                      <a href={`/${sid}/${e.data.slug}/`} class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-3 hover:border-[color:var(--color-accent)]">
+                        <code class="text-sm text-[color:var(--color-accent)]">{e.data.code}</code>
+                        <span class="text-sm text-[color:var(--color-text-muted)] ml-2">— {e.data.plainTitle}</span>
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+    )}
+  </div>
+</BaseLayout>

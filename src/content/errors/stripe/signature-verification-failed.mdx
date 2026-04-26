@@ -1,0 +1,154 @@
+---
+service: stripe
+code: signature_verification_failed
+slug: signature-verification-failed
+title: "Stripe Error: signature_verification_failed — Webhook Signature Invalid (Cause + Fix)"
+plainTitle: Webhook Signature Verification Failed
+httpStatus: 400
+category: webhook
+severity: high
+tldrCause: "Your webhook handler called `stripe.webhooks.constructEvent()` and the signature in the `Stripe-Signature` header didn't match the HMAC-SHA256 of the raw request body computed with your endpoint secret."
+tldrFix: "Use the *raw* request body (not the parsed JSON), confirm the endpoint secret matches the exact webhook endpoint receiving the call (test vs live, primary vs Connect), and verify your framework isn't rewriting or trimming the body before verification."
+contextCode:
+  language: javascript
+  filename: webhook.js
+  code: |
+    import Stripe from 'stripe';
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+    app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+      const sig = req.headers['stripe-signature'];
+      try {
+        const event = stripe.webhooks.constructEvent(
+          req.body,                          // must be raw Buffer, NOT JSON
+          sig,
+          process.env.STRIPE_WEBHOOK_SECRET, // whsec_... from Dashboard
+        );
+        // handle event
+      } catch (err) {
+        // err.message: 'No signatures found matching the expected signature for payload'
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+      }
+      res.json({ received: true });
+    });
+  caption: "The `req.body` must be a raw Buffer for verification — using `express.json()` middleware before `express.raw()` will silently break it."
+causes:
+  - title: Body was parsed as JSON before verification
+    body: "By far the #1 cause. Express's `express.json()`, FastAPI's automatic body parsing, Next.js API routes, or any middleware that turns the request body into an object will re-serialise it back to a different byte sequence than Stripe signed. The HMAC will never match."
+  - title: Wrong endpoint secret (live vs test, or wrong endpoint)
+    body: "Each webhook endpoint has its own `whsec_...` secret. Using the test-mode secret to verify a live-mode payload fails. Copy-pasting the wrong endpoint's secret (e.g., from a Connect endpoint to a primary endpoint) also fails. Stripe CLI's `stripe listen` issues yet another secret that only works for forwarded events."
+  - title: Body modified by reverse proxy or CDN
+    body: "Cloudflare, nginx, AWS API Gateway, or a service worker may rewrite the body — adding/removing a trailing newline, normalising line endings, or transforming UTF-8 BOMs. Any byte-level change invalidates the signature."
+  - title: Tolerance window exceeded (replayed or delayed event)
+    body: "Stripe's default tolerance is 300 seconds between the timestamp in the signature header and your server's clock. If your server clock is skewed, or the request was queued/replayed beyond 5 minutes, verification fails with a tolerance error rather than a hash mismatch."
+  - title: Multiple endpoint secrets needed but only one configured
+    body: "If you create webhook endpoints for multiple Stripe accounts (Connect platforms) or rotate secrets, your handler must try each candidate secret. Stripe's SDK lets you pass an array; passing only the first secret fails when the event came from another endpoint."
+fixes:
+  - title: Use the raw request body — never parsed JSON
+    likelihood: high
+    body: |
+      The single most common cause is a body parser running before the signature check. In Express, mount `express.raw()` *only* on the webhook route, before any global JSON parser. In Next.js Pages Router, set `bodyParser: false` in the route config. In Next.js App Router, read `request.text()` directly. In FastAPI, use `await request.body()` (returns bytes).
+    code:
+      language: javascript
+      filename: nextjs-app-route.js
+      code: |
+        // app/api/stripe/webhook/route.js (Next.js App Router)
+        import Stripe from 'stripe';
+        export const runtime = 'nodejs';
+
+        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+        export async function POST(req) {
+          const body = await req.text(); // raw string, byte-identical to Stripe's payload
+          const sig = req.headers.get('stripe-signature');
+          try {
+            const event = stripe.webhooks.constructEvent(
+              body, sig, process.env.STRIPE_WEBHOOK_SECRET,
+            );
+            return Response.json({ received: true, type: event.type });
+          } catch (err) {
+            return new Response(`Webhook Error: ${err.message}`, { status: 400 });
+          }
+        }
+  - title: Verify you're using the right endpoint secret for this exact endpoint
+    likelihood: high
+    body: |
+      Each endpoint in Dashboard → Developers → Webhooks has its own `whsec_...`. Open the endpoint detail page, click "Reveal" next to "Signing secret," and confirm character-for-character that it matches your `STRIPE_WEBHOOK_SECRET` env var. If you're testing locally with `stripe listen`, that command prints a *different* secret each session — copy that one.
+  - title: Try multiple secrets if you have several endpoints or recently rotated
+    likelihood: medium
+    body: |
+      The Stripe Node SDK accepts an array of secrets in `constructEvent`. Iterate through known-valid secrets, returning the first one that verifies. Useful during secret rotations and multi-endpoint setups.
+    code:
+      language: javascript
+      filename: multiSecret.js
+      code: |
+        function verifyAny(rawBody, signature, secrets) {
+          for (const secret of secrets) {
+            try {
+              return stripe.webhooks.constructEvent(rawBody, signature, secret);
+            } catch (_) { /* try next */ }
+          }
+          throw new Error('No webhook secret matched');
+        }
+
+        const event = verifyAny(rawBody, sig, [
+          process.env.STRIPE_WEBHOOK_SECRET_PRIMARY,
+          process.env.STRIPE_WEBHOOK_SECRET_CONNECT,
+        ]);
+  - title: Check server clock skew if you see tolerance errors
+    likelihood: medium
+    body: |
+      If `err.message` contains "Timestamp outside the tolerance zone," your server clock is more than 5 minutes off Stripe's. Run `chronyc tracking` (Linux), `sntp -sS time.apple.com` (macOS), or `w32tm /query /status` (Windows) and resync via NTP. Containers without time sync (some lightweight Linux distros) are common offenders.
+  - title: Inspect what reaches your handler with a passthrough log
+    likelihood: low
+    body: |
+      Log the raw body length, first/last 20 bytes, and the `Stripe-Signature` header before verification. Compare against Stripe's webhook attempt log in Dashboard → Webhooks → Endpoint → Recent deliveries. Differences (length off by 1, smart quotes, BOM) instantly reveal upstream rewriting.
+detection: |
+  Alert on a non-zero `signature_verification_failed` rate per webhook endpoint, broken out by endpoint and by `event.type` you can't yet see (you can derive event type from `Stripe-Signature` timestamp + IP + delivery patterns even without verification). Stripe will retry failed deliveries, so a sustained verify-fail rate means business-critical events (payments, subscriptions) are being silently dropped after retries exhaust.
+related:
+  - card-declined
+  - insufficient-funds
+  - authentication-required
+  - api-key-invalid
+  - rate-limit-exceeded
+relatedHttp: 400
+relatedGuide: stripe-webhook-debugging
+faq:
+  - q: "Why does my webhook work locally with `stripe listen` but fail in production?"
+    a: "`stripe listen` mints a session-specific signing secret that only works for events forwarded by that CLI process. Production webhooks use the secret shown in Dashboard → Webhooks → Endpoint detail. They are different values — copy the production one from the Dashboard, not the CLI."
+  - q: "I'm using Express. Why does `express.json()` break Stripe verification?"
+    a: "`express.json()` parses the body into a JS object, then frameworks usually drop the original bytes. When you re-stringify the parsed object, key order and whitespace differ from the original, so the HMAC won't match. Mount `express.raw({ type: 'application/json' })` *only* on the webhook route, before the global JSON parser, and call the JSON parser on every other route."
+  - q: "Can I just compute the signature myself instead of using the SDK?"
+    a: "Yes — Stripe documents the algorithm: timestamp + '.' + payload, HMAC-SHA256 with your secret, hex-encoded. But you'll need to implement constant-time comparison, tolerance checking, and multiple-version handling. Use the SDK unless you have a specific reason."
+  - q: "Should `signature_verification_failed` return 400 or 401?"
+    a: "Return 400 (Bad Request). Stripe explicitly documents that 4xx responses (other than 401) cause Stripe to retry up to 3 days. 401 will also retry but is semantically misleading — the request didn't lack auth credentials, it was tampered with or misconfigured on your side."
+  - q: "Does the `Stripe-Signature` header contain multiple signatures?"
+    a: "Yes — it includes a `t=` timestamp and one or more `v1=` signatures (and historically `v0=`). The SDK iterates through them. This is how Stripe rotates signature schemes without breaking existing endpoints."
+  - q: "I rotated my webhook secret. How do I avoid downtime?"
+    a: "Pass an array of `[old_secret, new_secret]` to `constructEvent` (Stripe Node SDK supports this directly). Deploy that, wait for retries with the old signature to drain, then remove the old secret. Stripe also lets you generate the new secret without invalidating the old one — read the rotation flow in their Dashboard."
+  - q: "Why do I get verification failures for some events but not others?"
+    a: "Almost always a body-encoding edge case — the failing events have a UTF-8 character (emoji in customer name, non-ASCII description, decimal precision) that one of your middleware steps is normalising. Log raw byte length and compare against Stripe's `Content-Length` header to confirm."
+  - q: "Can a wrong API version cause `signature_verification_failed`?"
+    a: "No. The Stripe API version controls the *shape* of the event payload, not its signature. Signature mismatches always trace to body bytes, secret value, or timestamp tolerance — never to API version."
+escalate: |
+  Open a support ticket only after you've (a) logged the raw body length and confirmed it matches Stripe's `Content-Length`, (b) verified the endpoint secret character-for-character, and (c) ruled out reverse proxy/CDN rewriting. If verification still fails, attach a Stripe Dashboard webhook attempt ID — support can replay the exact byte stream and confirm it from their side.
+languages:
+  - javascript
+  - python
+  - ruby
+  - php
+  - go
+keywords:
+  - stripe signature_verification_failed
+  - stripe webhook signature error
+  - stripe constructEvent failed
+  - stripe webhook 400
+  - stripe-signature header invalid
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+A Stripe webhook signature verification failure means your endpoint received a payload that, when hashed with your endpoint secret, didn't match the HMAC Stripe sent in the `Stripe-Signature` header. Verification is byte-exact: even a single rewritten newline or a re-serialised JSON object will fail. The error is almost never about Stripe — it's about the bytes between Stripe's egress and your `constructEvent()` call.
+
+Get this right once and you never think about it again. Get it wrong and you silently drop business-critical events: paid invoices that don't grant access, subscription cancellations that don't deprovision, refunds that don't reach your ledger. The fix is almost always to use the *raw* request body, with no middleware between Stripe's TCP packet and `constructEvent()`.

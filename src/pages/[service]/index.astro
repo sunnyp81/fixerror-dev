@@ -1,0 +1,154 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import { SITE, canonical } from '../../lib/seo';
+import { breadcrumbSchema, collectionPageSchema } from '../../lib/schema';
+
+export async function getStaticPaths() {
+  const services = await getCollection('services');
+  return services.map((s) => ({
+    params: { service: s.data.id },
+    props: { service: s },
+  }));
+}
+
+const { service } = Astro.props;
+const data = service.data;
+
+const allErrors = await getCollection('errors');
+const errors = allErrors
+  .filter((e) => e.data.service === data.id && !e.data.noindex)
+  .sort((a, b) => a.data.code.localeCompare(b.data.code));
+
+const byCategory = errors.reduce<Record<string, typeof errors>>((acc, e) => {
+  (acc[e.data.category] ||= []).push(e);
+  return acc;
+}, {});
+
+const services = await getCollection('services');
+const otherServices = services
+  .filter((s) => s.data.id !== data.id && s.data.category === data.category)
+  .slice(0, 3);
+
+const path = `/${data.id}/`;
+const url = canonical(path);
+const title = `${data.name} Errors: Complete Reference (${errors.length} codes) — fixerror.dev`;
+const description = `Every ${data.name} error explained — cause, fix, and working code. ${data.tagline}.`;
+
+const breadcrumb = [
+  { name: 'Home', url: '/' },
+  { name: 'Services', url: '/services/' },
+  { name: data.name, url: path },
+];
+
+const jsonLd = [
+  breadcrumbSchema(breadcrumb),
+  collectionPageSchema({
+    name: title,
+    description,
+    url,
+    items: errors.map((e) => ({
+      name: `${data.name} ${e.data.code}`,
+      url: `/${data.id}/${e.data.slug}/`,
+    })),
+  }),
+];
+
+const categoryLabels: Record<string, string> = {
+  auth: 'Authentication',
+  'rate-limit': 'Rate limits',
+  validation: 'Validation',
+  network: 'Network',
+  billing: 'Billing & quota',
+  permission: 'Permissions',
+  'not-found': 'Not found',
+  server: 'Server errors',
+  config: 'Configuration',
+  database: 'Database',
+  runtime: 'Runtime',
+  build: 'Build',
+  deploy: 'Deployment',
+  cors: 'CORS',
+  webhook: 'Webhooks',
+  other: 'Other',
+};
+---
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={breadcrumb} />
+
+    <header class="mb-10">
+      <div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
+        <span class="font-mono px-2 py-0.5 rounded-md bg-[color:var(--color-bg-card)] border border-[color:var(--color-border)] text-[color:var(--color-text-muted)] capitalize">{data.category}</span>
+      </div>
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight mb-3">{data.name} Errors</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)] max-w-3xl leading-relaxed">{data.description}</p>
+    </header>
+
+    <section class="prose mb-10">
+      <p>{data.longDescription}</p>
+    </section>
+
+    {Object.entries(byCategory).map(([cat, items]) => (
+      <section class="mb-10">
+        <h2 class="text-xl font-semibold tracking-tight mb-4 flex items-center gap-3">
+          {categoryLabels[cat] ?? cat}
+          <span class="text-xs font-mono text-[color:var(--color-text-dim)]">({items.length})</span>
+        </h2>
+        <ul class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {items.map((e) => (
+            <li>
+              <a
+                href={`/${data.id}/${e.data.slug}/`}
+                class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-3 hover:border-[color:var(--color-accent)] transition-colors h-full"
+              >
+                <div class="flex items-start justify-between gap-2">
+                  <code class="text-sm text-[color:var(--color-accent)] font-mono">{e.data.code}</code>
+                  {e.data.httpStatus && <span class="text-xs font-mono text-[color:var(--color-text-dim)]">{e.data.httpStatus}</span>}
+                </div>
+                <div class="text-sm text-[color:var(--color-text)] mt-1">{e.data.plainTitle}</div>
+                <div class="text-xs text-[color:var(--color-text-muted)] mt-1 line-clamp-2">{e.data.tldrCause}</div>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+
+    <section class="mt-12 grid grid-cols-1 md:grid-cols-3 gap-3">
+      <a href={data.docsUrl} target="_blank" rel="noopener" class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)]">
+        <div class="text-xs uppercase tracking-wider text-[color:var(--color-text-dim)] mb-1">Official docs</div>
+        <div class="text-sm text-[color:var(--color-accent)] truncate">{data.docsUrl}</div>
+      </a>
+      {data.statusUrl && (
+        <a href={data.statusUrl} target="_blank" rel="noopener" class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)]">
+          <div class="text-xs uppercase tracking-wider text-[color:var(--color-text-dim)] mb-1">Status page</div>
+          <div class="text-sm text-[color:var(--color-accent)] truncate">{data.statusUrl}</div>
+        </a>
+      )}
+      {data.supportUrl && (
+        <a href={data.supportUrl} target="_blank" rel="noopener" class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)]">
+          <div class="text-xs uppercase tracking-wider text-[color:var(--color-text-dim)] mb-1">Support</div>
+          <div class="text-sm text-[color:var(--color-accent)] truncate">{data.supportUrl}</div>
+        </a>
+      )}
+    </section>
+
+    {otherServices.length > 0 && (
+      <section class="mt-12">
+        <h2 class="text-xl font-semibold tracking-tight mb-4">Related services</h2>
+        <ul class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {otherServices.map((s) => (
+            <li>
+              <a href={`/${s.data.id}/`} class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)]">
+                <div class="font-semibold">{s.data.name}</div>
+                <div class="text-sm text-[color:var(--color-text-muted)] mt-1">{s.data.tagline}</div>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+  </div>
+</BaseLayout>

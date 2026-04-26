@@ -1,0 +1,145 @@
+---
+service: nextjs
+code: module_not_found
+slug: module-not-found
+title: "Next.js Error: Module not found — Can't Resolve Import (Cause + Fix)"
+plainTitle: Module Not Found
+category: build
+severity: high
+tldrCause: The Next.js build (webpack/Turbopack) tried to resolve an import path and couldn't find it. Either the package isn't installed, the relative path is wrong, a TypeScript path alias isn't mirrored in `tsconfig.json` and `next.config.js`, or the file's case differs between disk and import (Linux is case-sensitive, macOS isn't).
+tldrFix: "Run `npm install` (or `pnpm install`/`yarn`), check the import path matches the actual file (including case), confirm any `@/` alias is declared in `tsconfig.json` `paths`, and ensure node_modules isn't ignored by your Docker build context or Vercel ignored-build-step."
+contextCode:
+  language: text
+  filename: build-output
+  code: |
+    ./app/dashboard/page.tsx:3:0
+    Module not found: Can't resolve '@/components/UserCard'
+
+      1 | import { Suspense } from 'react';
+    > 2 | import { UserCard } from '@/components/UserCard';
+        |          ^
+      3 |
+      4 | export default function Dashboard() {
+
+    https://nextjs.org/docs/messages/module-not-found
+  caption: Next.js prints the file, line, and the path that failed to resolve. The arrow points at the import statement, not the missing module.
+causes:
+  - title: Package missing from node_modules
+    body: "You imported a package that isn't installed, or your lockfile has it but `npm install` was never run on this checkout. Common after pulling a branch with new deps, switching package managers (npm ↔ pnpm), or building in a Docker stage that doesn't COPY node_modules and doesn't run install."
+  - title: Wrong relative path or filename case
+    body: "`./components/userCard` vs `./components/UserCard.tsx`. macOS and Windows treat these as the same; Linux (and your Vercel/Docker build) does not. Builds that pass locally and fail in CI are almost always case-sensitivity bugs."
+  - title: Path alias declared in tsconfig but not in the bundler config
+    body: "TypeScript's `paths` (`@/*: ./src/*`) only affects type-checking. Next.js 13+ reads it automatically, but custom webpack configs, Jest, and older Next versions need the alias mirrored in `next.config.js` `webpack.resolve.alias` or in the test runner's moduleNameMapper."
+  - title: Module exists but uses a non-existent subpath export
+    body: "Modern packages declare `exports` in their `package.json`. Importing `lodash/fp/curry` from a package that doesn't expose that subpath fails even though the file exists on disk. The error is identical: 'can't resolve …'."
+  - title: File ignored by `.dockerignore`, `.vercelignore`, or `.gitignore`
+    body: "The file exists locally but never reaches the build environment. Common with `.env`-style files in `.dockerignore`, or a `dist/` folder that's gitignored but imported from."
+fixes:
+  - title: Reinstall dependencies and clear the build cache
+    likelihood: high
+    body: |
+      Most module-not-found errors after a branch switch or package.json change are stale node_modules or a stale `.next` cache. Nuke and reinstall in the right order.
+    code:
+      language: bash
+      filename: clean-install.sh
+      code: |
+        # Stop dev server first.
+        rm -rf node_modules .next
+        rm -f package-lock.json yarn.lock pnpm-lock.yaml  # only if mismatched
+        npm install                                       # or pnpm install / yarn
+
+        # If it's a Next.js cache issue specifically:
+        npx next build --no-lint
+  - title: Verify the import path's case matches the file on disk
+    likelihood: high
+    body: |
+      Linux file systems are case-sensitive. If your import says `./UserCard` and the file is `userCard.tsx`, it works on macOS and Windows but fails on Vercel and Docker. Use `git ls-files` to see the actual case Git tracks.
+    code:
+      language: bash
+      filename: check-case.sh
+      code: |
+        # See the real, tracked filename:
+        git ls-files | grep -i usercard
+
+        # Rename a file's case in Git (single-step, cross-platform-safe):
+        git mv components/userCard.tsx components/UserCard.tsx
+        git commit -m "fix: rename UserCard to match imports"
+  - title: Mirror tsconfig path aliases everywhere they're consumed
+    likelihood: high
+    body: |
+      Next.js 13+ reads `tsconfig.json` `paths` automatically for the main build. Your test runner and any custom webpack config don't. Declare the alias in every config that resolves modules.
+    code:
+      language: json
+      filename: tsconfig.json
+      code: |
+        {
+          "compilerOptions": {
+            "baseUrl": ".",
+            "paths": {
+              "@/*": ["./src/*"],
+              "@components/*": ["./src/components/*"]
+            }
+          }
+        }
+  - title: Check the package's exports field for valid subpaths
+    likelihood: medium
+    body: |
+      Open `node_modules/<pkg>/package.json` and look at `exports`. If the path you're importing isn't listed, you're importing a subpath the package's author didn't expose. Either import from the documented entry point or use the package's deep-import escape hatch (rarely advisable).
+    code:
+      language: javascript
+      filename: bad-and-good.js
+      code: |
+        // BAD — react-icons subpath not exported in some versions
+        import { FaUser } from 'react-icons/fa/FaUser';
+
+        // GOOD — use the documented entry
+        import { FaUser } from 'react-icons/fa';
+  - title: Audit your ignore files
+    likelihood: low
+    body: |
+      Run `git check-ignore -v <path>` to see if a file is ignored. For Vercel: `.vercelignore` is undocumented but real — make sure your `src/` is not in it. For Docker: print the build context size; if it's much smaller than your repo, `.dockerignore` is dropping files you need.
+detection: |
+  Wire `next build` into CI on every PR — module-not-found errors are deterministic and always catchable in CI before they hit production. Add a `tsc --noEmit` step alongside; TypeScript catches missing-module errors faster than a full build. For monorepos, run a fresh checkout build (no cache) weekly to catch case-sensitivity bugs before someone's Linux-only deploy fails.
+related:
+  - hydration-failed-nextjs
+  - function-invocation-timeout-nextjs
+  - err-require-esm-nodejs
+  - module-not-found-error-python
+  - econnrefused-nodejs
+relatedGuide: nextjs-build-errors
+faq:
+  - q: Why does the build pass locally on my Mac but fail on Vercel with module not found?
+    a: "Vercel builds run on Linux, which is case-sensitive. macOS's default file system (APFS) is case-insensitive — `import './UserCard'` happily resolves `./userCard.tsx` on your Mac, but Linux refuses. Run `git ls-files` to see the case Git actually tracks, and rename with `git mv` to make it match the imports."
+  - q: I installed the package but I still get module not found.
+    a: "Three checks in order: (1) `ls node_modules/<pkg>` — does the directory exist? If not, install failed silently; check for peer-dep warnings. (2) `cat node_modules/<pkg>/package.json | grep main` — is there a real entry point? Some types-only packages (`@types/foo`) ship no runtime code. (3) Did you install in the right workspace? In monorepos, you may have installed to the root when the consumer is a sub-package."
+  - q: How is `Module not found` different from `Cannot find module` in Node.js?
+    a: "Same error category, different messengers. `Module not found` comes from webpack/Turbopack at build time. `Cannot find module` (`MODULE_NOT_FOUND`) comes from Node.js at runtime when `require()` or `import()` can't resolve. Build-time means a static import; runtime means a dynamic import or a server-only path that bypassed bundling."
+  - q: Should I commit node_modules to fix this?
+    a: "No, never. Commit the lockfile (package-lock.json / pnpm-lock.yaml / yarn.lock) and run `npm ci` (not `npm install`) in CI to reproduce the exact tree. `npm ci` fails fast if the lockfile is out of date, which surfaces version drift before it becomes a module-not-found error in production."
+  - q: My TypeScript path alias works in the editor but fails at build time.
+    a: "Editor uses `tsconfig.json` for resolution; your build uses webpack/Turbopack. Next.js 13+ auto-reads `tsconfig.paths`, but only if `baseUrl` is set and the alias is exact. Older Next.js or custom webpack configs need the alias added to `next.config.js` `webpack.resolve.alias` manually."
+  - q: "Why does `import 'foo/internal/bar'` fail with a recent version of `foo`?"
+    a: "The package author added an `exports` field in `package.json` that doesn't include `./internal/bar`. Modern Node and bundlers respect `exports` strictly — only the listed subpaths are importable. Use the documented public API. If you genuinely need the deep import, pin the older version, but expect breakage."
+  - q: I'm using a monorepo with workspaces and getting module not found from another package.
+    a: "Two likely causes: (1) the consumer's `package.json` doesn't list the workspace package as a dependency, so the symlink in `node_modules` was never created — add it as `\"workspace:*\"`. (2) the workspace package's `main`/`exports` points to a `dist/` that isn't built — add a build step before the consumer builds, or point `main` directly at the source if your bundler can transpile it."
+  - q: Can a circular dependency cause module not found?
+    a: "Not directly — circular deps cause undefined exports or runtime errors, not resolution failures. But if your circular cycle includes a barrel file that re-exports from a missing module, you'll see module-not-found bubble up through the cycle. Run `npx madge --circular .` to find cycles."
+escalate: |
+  Module-not-found is a configuration or filesystem issue 99% of the time, not a Next.js bug. Before filing upstream: confirm the same import works in a brand-new `create-next-app` with the same Next.js version. If it doesn't, file at github.com/vercel/next.js with the failing repo. If it does work in a fresh app, the difference is in your config (next.config.js, tsconfig, or package.json) — diff against a known-good repo to isolate.
+languages:
+  - typescript
+  - javascript
+keywords:
+  - nextjs module not found
+  - cant resolve module
+  - nextjs import error
+  - nextjs path alias not working
+  - nextjs vercel build fail
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`Module not found` is a build-time error — webpack or Turbopack tried to walk your import graph, hit a path it couldn't resolve, and stopped. Unlike runtime errors, it's deterministic: the same code, the same filesystem, the same lockfile produces the same result every time. That makes it one of the easier Next.js errors to fix once you know which of the five buckets you're in: missing install, wrong path, missing alias, blocked subpath, or ignored file.
+
+The build output always tells you the import that failed and the file it came from. Read those two lines first; everything else is verifying which bucket applies.

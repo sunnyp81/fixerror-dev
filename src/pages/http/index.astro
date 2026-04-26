@@ -1,0 +1,71 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import { canonical } from '../../lib/seo';
+import { breadcrumbSchema, collectionPageSchema } from '../../lib/schema';
+
+const codes = (await getCollection('httpCodes')).sort((a, b) => a.data.code - b.data.code);
+const byCategory = codes.reduce<Record<string, typeof codes>>((acc, c) => {
+  (acc[c.data.category] ||= []).push(c);
+  return acc;
+}, {});
+
+const path = '/http/';
+const title = 'HTTP Status Codes: Complete Reference — fixerror.dev';
+const description = `Every HTTP status code from RFC 9110, with cause and fix. ${codes.length} codes, plain-English explanations, and cross-service mapping.`;
+
+const jsonLd = [
+  breadcrumbSchema([
+    { name: 'Home', url: '/' },
+    { name: 'HTTP codes', url: path },
+  ]),
+  collectionPageSchema({
+    name: title,
+    description,
+    url: canonical(path),
+    items: codes.map((c) => ({
+      name: `HTTP ${c.data.code} ${c.data.name}`,
+      url: `/http/${c.data.code}/`,
+    })),
+  }),
+];
+
+const labels: Record<string, string> = {
+  '1xx': 'Informational (1xx)',
+  '2xx': 'Success (2xx)',
+  '3xx': 'Redirection (3xx)',
+  '4xx': 'Client errors (4xx)',
+  '5xx': 'Server errors (5xx)',
+};
+---
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={[{ name: 'Home', url: '/' }, { name: 'HTTP codes' }]} />
+    <header class="mb-10">
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight mb-3">HTTP Status Codes</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)] max-w-3xl">
+        Every HTTP status code from RFC 9110, with the typical cause, the fix, and which services use them. Click any code for detailed troubleshooting.
+      </p>
+    </header>
+
+    {(['1xx', '2xx', '3xx', '4xx', '5xx'] as const).map((cat) => byCategory[cat] && (
+      <section class="mb-10">
+        <h2 class="text-xl font-semibold tracking-tight mb-4">{labels[cat]}</h2>
+        <ul class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {byCategory[cat].map((c) => (
+            <li>
+              <a href={`/http/${c.data.code}/`} class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-3 hover:border-[color:var(--color-accent)]">
+                <div class="flex items-baseline gap-3 mb-1">
+                  <code class="font-mono text-base font-semibold text-[color:var(--color-accent)]">{c.data.code}</code>
+                  <span class="text-sm text-[color:var(--color-text)]">{c.data.name}</span>
+                </div>
+                <div class="text-xs text-[color:var(--color-text-muted)] line-clamp-2">{c.data.description}</div>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+  </div>
+</BaseLayout>

@@ -1,0 +1,51 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import { canonical } from '../../lib/seo';
+import { breadcrumbSchema, collectionPageSchema } from '../../lib/schema';
+
+const comparisons = (await getCollection('comparisons')).sort((a, b) =>
+  a.data.title.localeCompare(b.data.title),
+);
+
+const path = '/compare/';
+const title = 'Service Comparisons — fixerror.dev';
+const description = 'Side-by-side error code comparisons between cloud, payment, AI, and database providers.';
+
+const jsonLd = [
+  breadcrumbSchema([{ name: 'Home', url: '/' }, { name: 'Compare', url: path }]),
+  collectionPageSchema({
+    name: title,
+    description,
+    url: canonical(path),
+    items: comparisons.map((c) => ({ name: c.data.title, url: `/compare/${c.data.slug}/` })),
+  }),
+];
+---
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={[{ name: 'Home', url: '/' }, { name: 'Compare' }]} />
+    <header class="mb-10">
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight mb-3">Comparisons</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)] max-w-3xl">
+        Side-by-side error code comparisons across cloud, payment, AI, and database providers.
+      </p>
+    </header>
+
+    {comparisons.length === 0 ? (
+      <p class="text-[color:var(--color-text-muted)]">Comparisons coming soon.</p>
+    ) : (
+      <ul class="space-y-3">
+        {comparisons.map((c) => (
+          <li>
+            <a href={`/compare/${c.data.slug}/`} class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4 hover:border-[color:var(--color-accent)]">
+              <div class="font-semibold mb-1">{c.data.title}</div>
+              <div class="text-sm text-[color:var(--color-text-muted)] line-clamp-2">{c.data.description}</div>
+            </a>
+          </li>
+        ))}
+      </ul>
+    )}
+  </div>
+</BaseLayout>

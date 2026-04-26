@@ -1,0 +1,159 @@
+---
+service: stripe
+code: authentication_required
+slug: authentication-required
+title: "Stripe Error: authentication_required — 3D Secure Required (Cause + Fix)"
+plainTitle: 3D Secure Authentication Required
+httpStatus: 402
+category: auth
+severity: high
+tldrCause: "The card issuer requires the customer to complete 3D Secure (SCA / PSD2) authentication, but the PaymentIntent was confirmed without the customer completing the 3DS challenge — usually because you're using a bare Card element instead of the Payment Element or didn't handle `requires_action`."
+tldrFix: "Switch to the Stripe Payment Element (handles SCA automatically) or, if using `confirmCardPayment`, present the `clientSecret` to Stripe.js so it can run the 3DS modal. Server-side, never confirm a PaymentIntent off-session without `setup_future_usage` and an authenticated mandate."
+contextCode:
+  language: javascript
+  filename: confirm.js
+  code: |
+    // Failing pattern — confirms server-side, no SCA flow:
+    const intent = await stripe.paymentIntents.create({
+      amount: 4999,
+      currency: 'gbp',
+      payment_method: 'pm_card_authenticationRequired',
+      confirm: true,
+    });
+    // intent.status === 'requires_action'
+    // intent.last_payment_error.code === 'authentication_required'
+    // intent.last_payment_error.decline_code === 'authentication_required'
+  caption: "When SCA is required, Stripe returns the PaymentIntent in `requires_action` — you must hand the `client_secret` to Stripe.js to run the 3DS challenge."
+causes:
+  - title: Issuer-mandated SCA under PSD2 / EEA rules
+    body: "Since 14 September 2019 (with rolling enforcement to March 2022), almost every EEA-issued card requires Strong Customer Authentication on most online charges. The issuer flags the transaction as needing 3DS and Stripe surfaces `authentication_required` if your flow doesn't run the challenge."
+  - title: Confirming a PaymentIntent server-side without Stripe.js
+    body: "If you call `paymentIntents.create({ confirm: true })` on the server without first running the customer through Stripe.js's `confirmPayment`, the SCA flow has no UI to render. The intent enters `requires_action` and your charge fails until you bring the customer back in front of Stripe.js."
+  - title: Off-session charge on a payment method with no prior authenticated setup
+    body: "Off-session charges (subscriptions, saved-card retries) only succeed when the customer originally set up the card with SCA *and* you're charging in a way the issuer trusts (recurring with the same merchant, fixed amount). Without a prior authenticated SetupIntent, off-session charges that need SCA fail."
+  - title: Issuer fraud signal triggering step-up authentication
+    body: "Even outside the EEA, issuers may unexpectedly request 3DS for high-value, cross-border, or pattern-anomaly transactions. US/CA issuers are increasingly using 3DS2 for risk-based step-up. Your code must always be prepared to handle `requires_action` regardless of card country."
+  - title: Customer abandoned the 3DS challenge mid-flow
+    body: "The customer saw the 3DS modal but closed it, switched tabs, or the popup was blocked. The PaymentIntent stays in `requires_action`. Retrying without re-running the challenge fails with the same code."
+fixes:
+  - title: Use the Stripe Payment Element — it handles SCA for you
+    likelihood: high
+    body: |
+      The Payment Element is Stripe's modern, SCA-ready replacement for the Card Element. It automatically detects `requires_action`, presents the 3DS modal, and confirms once authentication completes. You don't write any 3DS-specific code.
+    code:
+      language: javascript
+      filename: paymentElement.js
+      code: |
+        // Server: create PaymentIntent (do NOT confirm yet)
+        // const intent = await stripe.paymentIntents.create({ amount, currency, automatic_payment_methods: { enabled: true } });
+        // Send intent.client_secret to client.
+
+        // Client:
+        const stripe = Stripe('pk_live_...');
+        const elements = stripe.elements({ clientSecret });
+        const paymentElement = elements.create('payment');
+        paymentElement.mount('#payment-element');
+
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const { error } = await stripe.confirmPayment({
+            elements,
+            confirmParams: { return_url: 'https://example.com/return' },
+          });
+          if (error) console.error(error.message);
+        });
+  - title: Handle `requires_action` explicitly with `confirmCardPayment`
+    likelihood: high
+    body: |
+      If you've kept a legacy Card Element flow, check the PaymentIntent status and re-confirm with Stripe.js so it can render the 3DS modal.
+    code:
+      language: javascript
+      filename: confirmCardPayment.js
+      code: |
+        const result = await stripe.confirmCardPayment(clientSecret, {
+          payment_method: paymentMethodId,
+        });
+        if (result.error) {
+          if (result.error.code === 'card_declined' &&
+              result.error.decline_code === 'authentication_required') {
+            // Customer cancelled 3DS — surface a retry button
+            showRetry('Your bank requires extra verification. Please try again.');
+          } else {
+            showError(result.error.message);
+          }
+        } else if (result.paymentIntent.status === 'succeeded') {
+          showSuccess();
+        }
+  - title: Set `setup_future_usage` for off-session charges
+    likelihood: medium
+    body: |
+      For subscriptions and saved-card flows, the *first* charge must be on-session and authenticated. Use `setup_future_usage: 'off_session'` (or a separate SetupIntent) so the issuer registers the card for future off-session charges. Otherwise every recurring charge will trip `authentication_required`.
+    code:
+      language: javascript
+      filename: setupFutureUsage.js
+      code: |
+        const intent = await stripe.paymentIntents.create({
+          amount: 4999,
+          currency: 'gbp',
+          customer: customerId,
+          payment_method: paymentMethodId,
+          setup_future_usage: 'off_session',
+          confirm: true,
+        });
+  - title: For Stripe Billing, enable automatic SCA recovery emails
+    likelihood: medium
+    body: |
+      In Dashboard → Settings → Billing → Subscriptions and emails, enable "Email customers when their card requires authentication." Stripe sends the customer a hosted-page link to complete 3DS, which marks the invoice paid automatically. This recovers a measurable percentage of failed renewals.
+  - title: Test with the dedicated 3DS test cards
+    likelihood: low
+    body: |
+      Card `4000002500003155` always requires 3DS authentication. Card `4000002760003184` requires 3DS and *fails* the challenge. Card `4000008260003178` succeeds frictionlessly (no challenge but authenticated). Build automated tests for all three.
+detection: |
+  Track `authentication_required` separately from other `card_declined` reasons. A spike usually means (a) you've expanded into the EEA without updating your checkout, (b) a customer segment newly subject to PSD2 enforcement, or (c) a regression that bypassed your SCA flow. In Stripe Dashboard, the Payments analytics tab breaks down decline reasons over time.
+related:
+  - card-declined
+  - insufficient-funds
+  - signature-verification-failed
+  - api-key-invalid
+  - rate-limit-exceeded
+relatedHttp: 402
+relatedGuide: handling-payment-declines
+faq:
+  - q: "Is `authentication_required` only for European cards?"
+    a: "No. PSD2/SCA is mandatory for EEA-issued cards, but issuers worldwide increasingly request 3DS2 for risk-based step-up authentication. US, Canadian, and Asian cards can all return `authentication_required` on high-risk or unusual transactions. Always handle the flow regardless of card country."
+  - q: "What's the difference between `authentication_required` and `requires_action`?"
+    a: "`requires_action` is a PaymentIntent *status* meaning 'next step needed' (often 3DS). `authentication_required` is a `decline_code` meaning the customer *failed or skipped* the authentication. The first is normal mid-flow; the second is a terminal decline you need to recover from."
+  - q: "Can I bypass 3DS for trusted customers?"
+    a: "Sometimes. PSD2 supports exemptions: TRA (Transaction Risk Analysis) below thresholds, low-value (<€30), recurring with same amount, MIT (merchant-initiated transactions). Stripe automatically requests applicable exemptions when you use the Payment Element — but the issuer can override and force 3DS anyway."
+  - q: "Why does my saved card on a subscription trigger `authentication_required`?"
+    a: "The original setup didn't establish an authenticated mandate. When you save a card without `setup_future_usage` or a dedicated SetupIntent, the issuer treats every recurring charge as a fresh transaction and may demand 3DS. Recreate the mandate with a SetupIntent that completes 3DS once, then off-session charges work."
+  - q: "Does `authentication_required` count as a chargeback risk?"
+    a: "Lower than other declines. SCA shifts liability to the issuer once authentication completes successfully — disputes on authenticated transactions are typically borne by the bank, not you. Failing to authenticate, however, exposes you to disputes you'd otherwise win."
+  - q: "What if the customer's card doesn't support 3D Secure 2?"
+    a: "Stripe automatically falls back to 3DS1 for cards that don't support v2. Both flows resolve through the same `confirmCardPayment` / Payment Element path, so your code doesn't change. Some very old prepaid cards lack 3DS entirely — those will simply decline."
+  - q: "Can I retry a payment after `authentication_required` without showing the customer again?"
+    a: "No. The whole point of SCA is the customer must be present and verify themselves. You can re-attempt the same PaymentIntent only when the customer is back in front of Stripe.js to complete the challenge."
+  - q: "Does using ApplePay or GooglePay avoid `authentication_required`?"
+    a: "Usually yes — wallets carry a built-in cardholder verification (Face ID, Touch ID, device PIN) that satisfies SCA. Issuers accept these as authenticated and rarely step up to 3DS. This makes wallets the highest-conversion option in EEA checkouts."
+escalate: |
+  Stripe support can't override an issuer's SCA decision. Escalate only if (a) you see SCA being requested on transactions that should qualify for an exemption (recurring fixed-amount, low-value), or (b) the Payment Element isn't rendering the 3DS modal in your environment (suspect a CSP / sandboxed iframe issue). Otherwise, the path is to fix your client-side flow so the customer can complete authentication.
+languages:
+  - javascript
+  - python
+  - ruby
+  - php
+  - go
+keywords:
+  - stripe authentication_required
+  - stripe 3d secure error
+  - stripe SCA failed
+  - stripe PSD2 error
+  - stripe requires_action
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`authentication_required` is Stripe's signal that the card issuer wants the customer to prove they are the cardholder via 3D Secure (3DS), and your checkout flow either skipped that step or the customer abandoned it. Under PSD2 in the EEA — and increasingly worldwide — issuers reject any online charge that bypasses Strong Customer Authentication when they expect it.
+
+The right answer is almost never server-side. Move authentication into Stripe.js (Payment Element or `confirmCardPayment`), which handles the 3DS modal, fallback to 3DS1 for older cards, exemption requests, and the `requires_action` polling for you. Once your client-side flow is set up correctly, `authentication_required` errors should drop to near-zero and your EEA conversion rates climb noticeably.

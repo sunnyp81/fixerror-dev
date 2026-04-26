@@ -1,0 +1,743 @@
+[
+  {
+    "id": "100",
+    "code": 100,
+    "name": "Continue",
+    "category": "1xx",
+    "description": "Server has received the request headers and the client should proceed to send the request body.",
+    "longDescription": "RFC 9110 §15.2.1. Used with the Expect: 100-continue header. Modern HTTP/2 clients rarely use this; it remains relevant in HTTP/1.1 with large request bodies where the client wants to confirm acceptance before transmitting the body.",
+    "rfc": "RFC 9110 §15.2.1",
+    "typicalCauses": [
+      "Client sent Expect: 100-continue header",
+      "Server signaling readiness for request body"
+    ],
+    "isError": false
+  },
+  {
+    "id": "101",
+    "code": 101,
+    "name": "Switching Protocols",
+    "category": "1xx",
+    "description": "Server is switching protocols as requested by the client (e.g., HTTP to WebSocket).",
+    "longDescription": "RFC 9110 §15.2.2. Most commonly seen during WebSocket upgrade handshakes. The Upgrade and Connection headers must be present in the request.",
+    "rfc": "RFC 9110 §15.2.2",
+    "typicalCauses": [
+      "WebSocket upgrade request",
+      "HTTP/2 upgrade from HTTP/1.1"
+    ],
+    "isError": false
+  },
+  {
+    "id": "200",
+    "code": 200,
+    "name": "OK",
+    "category": "2xx",
+    "description": "Request succeeded. The response body contains the requested resource.",
+    "longDescription": "RFC 9110 §15.3.1. The standard success response. For PUT/DELETE operations, 204 (No Content) is often more appropriate. For POST creating a resource, 201 (Created) signals more clearly.",
+    "rfc": "RFC 9110 §15.3.1",
+    "typicalCauses": [
+      "Successful GET, POST, PUT, or PATCH"
+    ],
+    "isError": false
+  },
+  {
+    "id": "201",
+    "code": 201,
+    "name": "Created",
+    "category": "2xx",
+    "description": "Request succeeded and a new resource was created. Response should include Location header pointing to the new resource.",
+    "longDescription": "RFC 9110 §15.3.2. Returned after POST creating a new resource. Best practice: include Location header with the URL of the created resource and the resource representation in the body.",
+    "rfc": "RFC 9110 §15.3.2",
+    "typicalCauses": [
+      "Successful POST creating a resource",
+      "PUT creating (not updating) a resource"
+    ],
+    "isError": false
+  },
+  {
+    "id": "202",
+    "code": 202,
+    "name": "Accepted",
+    "category": "2xx",
+    "description": "Request accepted for processing but not completed. Used for asynchronous operations.",
+    "longDescription": "RFC 9110 §15.3.3. The request has been accepted but processing has not finished. Common for long-running operations. Response should include a way to check status (e.g., a polling URL).",
+    "rfc": "RFC 9110 §15.3.3",
+    "typicalCauses": [
+      "Async job queued",
+      "Background processing started"
+    ],
+    "isError": false
+  },
+  {
+    "id": "204",
+    "code": 204,
+    "name": "No Content",
+    "category": "2xx",
+    "description": "Request succeeded but no response body. Common for DELETE operations.",
+    "longDescription": "RFC 9110 §15.3.5. Successful operation with no representation to return. Body must be empty. Often used for DELETE, or PUT/PATCH where the client does not need the updated resource back.",
+    "rfc": "RFC 9110 §15.3.5",
+    "typicalCauses": [
+      "Successful DELETE",
+      "Successful PUT/PATCH without echoing resource"
+    ],
+    "isError": false
+  },
+  {
+    "id": "301",
+    "code": 301,
+    "name": "Moved Permanently",
+    "category": "3xx",
+    "description": "Resource has permanently moved to the URL in the Location header. Subsequent requests should use the new URL.",
+    "longDescription": "RFC 9110 §15.4.2. SEO-significant: search engines transfer ranking signals on 301. Some clients change POST to GET on follow; use 308 to preserve the method.",
+    "rfc": "RFC 9110 §15.4.2",
+    "typicalCauses": [
+      "Permanent URL change",
+      "HTTPS upgrade redirect",
+      "Domain migration"
+    ],
+    "isError": false
+  },
+  {
+    "id": "302",
+    "code": 302,
+    "name": "Found",
+    "category": "3xx",
+    "description": "Resource temporarily at the URL in the Location header. Original URL still active.",
+    "longDescription": "RFC 9110 §15.4.3. Originally meant 'Moved Temporarily'. Most clients change POST to GET on follow, which surprised many developers — that's why 307 (Temporary Redirect) was added to preserve the method.",
+    "rfc": "RFC 9110 §15.4.3",
+    "typicalCauses": [
+      "Login redirect",
+      "Temporary maintenance redirect"
+    ],
+    "isError": false
+  },
+  {
+    "id": "304",
+    "code": 304,
+    "name": "Not Modified",
+    "category": "3xx",
+    "description": "Cached resource is still valid. Client should use cached copy.",
+    "longDescription": "RFC 9110 §15.4.5. Returned in response to conditional GET (If-Modified-Since, If-None-Match). Body must be empty. Critical for HTTP caching efficiency.",
+    "rfc": "RFC 9110 §15.4.5",
+    "typicalCauses": [
+      "Conditional GET with valid ETag/Last-Modified"
+    ],
+    "isError": false
+  },
+  {
+    "id": "307",
+    "code": 307,
+    "name": "Temporary Redirect",
+    "category": "3xx",
+    "description": "Temporary redirect that preserves the HTTP method (unlike 302).",
+    "longDescription": "RFC 9110 §15.4.8. Like 302 but the client must use the same method on the redirect target. POST stays POST.",
+    "rfc": "RFC 9110 §15.4.8",
+    "typicalCauses": [
+      "Maintenance redirect preserving POST/PUT",
+      "Geo redirect"
+    ],
+    "isError": false
+  },
+  {
+    "id": "308",
+    "code": 308,
+    "name": "Permanent Redirect",
+    "category": "3xx",
+    "description": "Permanent redirect that preserves the HTTP method (unlike 301).",
+    "longDescription": "RFC 9110 §15.4.9. Use this instead of 301 if you need POST/PUT/DELETE preserved. Caches treat it as permanent.",
+    "rfc": "RFC 9110 §15.4.9",
+    "typicalCauses": [
+      "Permanent URL change preserving non-GET methods"
+    ],
+    "isError": false
+  },
+  {
+    "id": "400",
+    "code": 400,
+    "name": "Bad Request",
+    "category": "4xx",
+    "description": "Server cannot process the request due to malformed syntax, invalid parameters, or invalid state.",
+    "longDescription": "RFC 9110 §15.5.1. The catch-all 4xx for client-side errors that don't fit a more specific code. Common causes: malformed JSON, missing required fields, invalid query parameters, request body too large for the parser, invalid Content-Type.",
+    "rfc": "RFC 9110 §15.5.1",
+    "typicalCauses": [
+      "Malformed JSON body",
+      "Missing required parameters",
+      "Invalid Content-Type",
+      "Field validation failure",
+      "Schema mismatch"
+    ],
+    "isError": true
+  },
+  {
+    "id": "401",
+    "code": 401,
+    "name": "Unauthorized",
+    "category": "4xx",
+    "description": "Authentication required or failed. Despite the name, this means 'unauthenticated'.",
+    "longDescription": "RFC 9110 §15.5.2. The server requires authentication and either none was provided or the credentials are invalid. Response must include WWW-Authenticate header. Often confused with 403 — 401 means 'who are you?', 403 means 'I know who you are, but you can't do this'.",
+    "rfc": "RFC 9110 §15.5.2",
+    "typicalCauses": [
+      "Missing API key",
+      "Invalid token",
+      "Expired JWT",
+      "Wrong username/password",
+      "Missing Authorization header"
+    ],
+    "isError": true
+  },
+  {
+    "id": "402",
+    "code": 402,
+    "name": "Payment Required",
+    "category": "4xx",
+    "description": "Reserved for future use. Used by Stripe and others to signal billing/quota issues.",
+    "longDescription": "RFC 9110 §15.5.3. Originally reserved for digital cash systems that never materialised. Now repurposed by some APIs (notably Stripe and OpenAI) to indicate the customer's payment method failed or quota is exhausted.",
+    "rfc": "RFC 9110 §15.5.3",
+    "typicalCauses": [
+      "Stripe card_declined",
+      "OpenAI insufficient_quota",
+      "Paid feature on free plan"
+    ],
+    "isError": true
+  },
+  {
+    "id": "403",
+    "code": 403,
+    "name": "Forbidden",
+    "category": "4xx",
+    "description": "Authenticated but not authorized. Server understood the request but refuses to fulfill it.",
+    "longDescription": "RFC 9110 §15.5.4. The client is authenticated (or auth is irrelevant) but lacks permission to access the resource. Cannot be resolved by re-authenticating with the same credentials. Common in IAM/RBAC contexts and CORS preflight failures.",
+    "rfc": "RFC 9110 §15.5.4",
+    "typicalCauses": [
+      "IAM/RBAC permission missing",
+      "CORS rejection",
+      "IP allowlist",
+      "Disabled account",
+      "Suspended API key"
+    ],
+    "isError": true
+  },
+  {
+    "id": "404",
+    "code": 404,
+    "name": "Not Found",
+    "category": "4xx",
+    "description": "Server cannot find the requested resource. May also be returned to hide existence of resource.",
+    "longDescription": "RFC 9110 §15.5.5. The most familiar HTTP error. Sometimes used (controversially) instead of 403 to avoid revealing whether a resource exists. In APIs, often indicates a wrong path, deleted resource, or wrong ID.",
+    "rfc": "RFC 9110 §15.5.5",
+    "typicalCauses": [
+      "Wrong URL path",
+      "Deleted resource",
+      "Typo in resource ID",
+      "Resource never existed",
+      "Hidden 403 (auth-aware 404)"
+    ],
+    "isError": true
+  },
+  {
+    "id": "405",
+    "code": 405,
+    "name": "Method Not Allowed",
+    "category": "4xx",
+    "description": "Resource exists but doesn't support the HTTP method used. Response must include Allow header.",
+    "longDescription": "RFC 9110 §15.5.6. The endpoint exists but rejects this method (e.g., POST to a read-only endpoint). The Allow header in the response lists supported methods.",
+    "rfc": "RFC 9110 §15.5.6",
+    "typicalCauses": [
+      "POST to GET-only endpoint",
+      "DELETE on a read-only resource",
+      "Wrong HTTP verb in client code"
+    ],
+    "isError": true
+  },
+  {
+    "id": "406",
+    "code": 406,
+    "name": "Not Acceptable",
+    "category": "4xx",
+    "description": "Server cannot produce a response matching the Accept headers in the request.",
+    "longDescription": "RFC 9110 §15.5.7. Triggered when the client's Accept header (or Accept-Language, Accept-Encoding) lists no representation the server can produce. Rare in practice; PostgREST uses it for malformed query syntax.",
+    "rfc": "RFC 9110 §15.5.7",
+    "typicalCauses": [
+      "Accept: application/xml when only JSON is supported",
+      "PostgREST malformed query"
+    ],
+    "isError": true
+  },
+  {
+    "id": "408",
+    "code": 408,
+    "name": "Request Timeout",
+    "category": "4xx",
+    "description": "Server timed out waiting for the request. Client may retry.",
+    "longDescription": "RFC 9110 §15.5.9. The server didn't receive the full request within its timeout window. Different from 504 (which is about upstream timeout). Often seen with slow uploads or stalled connections.",
+    "rfc": "RFC 9110 §15.5.9",
+    "typicalCauses": [
+      "Slow client upload",
+      "Network stall mid-request",
+      "Server idle timeout too short"
+    ],
+    "isError": true
+  },
+  {
+    "id": "409",
+    "code": 409,
+    "name": "Conflict",
+    "category": "4xx",
+    "description": "Request conflicts with current state of the resource. Common with concurrent updates and unique constraints.",
+    "longDescription": "RFC 9110 §15.5.10. Used for write conflicts (concurrent updates with stale ETags), unique constraint violations, or state machine errors. APIs sometimes return 409 instead of 422 for business rule violations.",
+    "rfc": "RFC 9110 §15.5.10",
+    "typicalCauses": [
+      "Optimistic concurrency conflict (stale ETag)",
+      "Unique constraint violation",
+      "State machine violation",
+      "Duplicate creation"
+    ],
+    "isError": true
+  },
+  {
+    "id": "410",
+    "code": 410,
+    "name": "Gone",
+    "category": "4xx",
+    "description": "Resource permanently removed and will not return. Stronger than 404.",
+    "longDescription": "RFC 9110 §15.5.11. Signals to clients (and search engines) that the resource is gone for good. Use this instead of 404 when you want crawlers to deindex.",
+    "rfc": "RFC 9110 §15.5.11",
+    "typicalCauses": [
+      "Permanently deleted page",
+      "Deprecated API endpoint"
+    ],
+    "isError": true
+  },
+  {
+    "id": "411",
+    "code": 411,
+    "name": "Length Required",
+    "category": "4xx",
+    "description": "Server requires Content-Length header on the request.",
+    "longDescription": "RFC 9110 §15.5.12. Rare. Some servers reject requests without Content-Length on bodies. Most modern servers accept Transfer-Encoding: chunked instead.",
+    "rfc": "RFC 9110 §15.5.12",
+    "typicalCauses": [
+      "Missing Content-Length on POST/PUT"
+    ],
+    "isError": true
+  },
+  {
+    "id": "412",
+    "code": 412,
+    "name": "Precondition Failed",
+    "category": "4xx",
+    "description": "A precondition (If-Match, If-Unmodified-Since) in the request headers failed.",
+    "longDescription": "RFC 9110 §15.5.13. Used in optimistic concurrency control: the client sends If-Match: <etag>, and 412 means the resource has changed since.",
+    "rfc": "RFC 9110 §15.5.13",
+    "typicalCauses": [
+      "If-Match header doesn't match current ETag",
+      "If-Unmodified-Since precondition failed"
+    ],
+    "isError": true
+  },
+  {
+    "id": "413",
+    "code": 413,
+    "name": "Content Too Large",
+    "category": "4xx",
+    "description": "Request body exceeds server's size limit.",
+    "longDescription": "RFC 9110 §15.5.14. Formerly 'Payload Too Large'. Common with file uploads. Server-side fix: increase client_max_body_size (nginx), upload_max_filesize (PHP), body parser limit (Node).",
+    "rfc": "RFC 9110 §15.5.14",
+    "typicalCauses": [
+      "File upload exceeds server limit",
+      "JSON body exceeds parser limit",
+      "Form data too large"
+    ],
+    "isError": true
+  },
+  {
+    "id": "414",
+    "code": 414,
+    "name": "URI Too Long",
+    "category": "4xx",
+    "description": "Request URI is too long for the server to process.",
+    "longDescription": "RFC 9110 §15.5.15. Most servers cap URLs around 2048-8192 bytes. Common when query strings carry large encoded data — switch to POST with a body instead.",
+    "rfc": "RFC 9110 §15.5.15",
+    "typicalCauses": [
+      "Massive query string",
+      "Encoded data in URL instead of body",
+      "Open redirect attack attempt"
+    ],
+    "isError": true
+  },
+  {
+    "id": "415",
+    "code": 415,
+    "name": "Unsupported Media Type",
+    "category": "4xx",
+    "description": "Request's Content-Type isn't supported by the endpoint.",
+    "longDescription": "RFC 9110 §15.5.16. The endpoint supports specific Content-Types (e.g., only application/json) and the client sent something else. Usually missing or wrong Content-Type header on the client.",
+    "rfc": "RFC 9110 §15.5.16",
+    "typicalCauses": [
+      "Missing Content-Type header",
+      "Sending form data to JSON-only endpoint",
+      "Wrong charset"
+    ],
+    "isError": true
+  },
+  {
+    "id": "422",
+    "code": 422,
+    "name": "Unprocessable Content",
+    "category": "4xx",
+    "description": "Request is well-formed but contains semantic errors. Common for validation failures.",
+    "longDescription": "RFC 9110 §15.5.21 (originally WebDAV RFC 4918). Most API frameworks (FastAPI, Laravel, Rails) use 422 for input validation failures with structured field errors in the response body.",
+    "rfc": "RFC 9110 §15.5.21",
+    "typicalCauses": [
+      "Pydantic/Joi validation failure",
+      "Field format wrong (email, URL, date)",
+      "Business rule violation",
+      "Required field missing"
+    ],
+    "isError": true
+  },
+  {
+    "id": "423",
+    "code": 423,
+    "name": "Locked",
+    "category": "4xx",
+    "description": "Resource is locked. WebDAV.",
+    "longDescription": "RFC 4918 §11.3. WebDAV-specific. The resource is locked and cannot be modified. Some non-WebDAV APIs use it to signal a temporary edit lock.",
+    "rfc": "RFC 4918 §11.3",
+    "typicalCauses": [
+      "WebDAV lock",
+      "Application-level edit lock"
+    ],
+    "isError": true
+  },
+  {
+    "id": "424",
+    "code": 424,
+    "name": "Failed Dependency",
+    "category": "4xx",
+    "description": "Request failed because it depended on a previous request that failed.",
+    "longDescription": "RFC 4918 §11.4. WebDAV. The action depended on another action that failed. Some APIs use it for batch operations where one item's failure cascades.",
+    "rfc": "RFC 4918 §11.4",
+    "typicalCauses": [
+      "Batch operation dependency failed"
+    ],
+    "isError": true
+  },
+  {
+    "id": "426",
+    "code": 426,
+    "name": "Upgrade Required",
+    "category": "4xx",
+    "description": "Server requires the client to upgrade to a different protocol.",
+    "longDescription": "RFC 9110 §15.5.22. Often used to force HTTP/1.1 → HTTP/2 or to force WebSocket upgrades.",
+    "rfc": "RFC 9110 §15.5.22",
+    "typicalCauses": [
+      "Server requires HTTPS",
+      "Server requires WebSocket"
+    ],
+    "isError": true
+  },
+  {
+    "id": "428",
+    "code": 428,
+    "name": "Precondition Required",
+    "category": "4xx",
+    "description": "Server requires the request to be conditional (e.g., include If-Match).",
+    "longDescription": "RFC 6585. Server requires client to use conditional requests to avoid lost-update problems. Pair with ETags.",
+    "rfc": "RFC 6585",
+    "typicalCauses": [
+      "Server enforces optimistic concurrency"
+    ],
+    "isError": true
+  },
+  {
+    "id": "429",
+    "code": 429,
+    "name": "Too Many Requests",
+    "category": "4xx",
+    "description": "Client has sent too many requests in a given time period (rate limited).",
+    "longDescription": "RFC 6585. The most common production-pain status code. Response should include Retry-After header (seconds or HTTP date) and often X-RateLimit-* headers showing remaining quota and reset time. Always implement exponential backoff on 429.",
+    "rfc": "RFC 6585",
+    "typicalCauses": [
+      "Rate limit exceeded",
+      "Burst limit hit",
+      "Quota exhausted",
+      "Concurrent request limit exceeded"
+    ],
+    "isError": true
+  },
+  {
+    "id": "431",
+    "code": 431,
+    "name": "Request Header Fields Too Large",
+    "category": "4xx",
+    "description": "Request headers exceed server's size limit.",
+    "longDescription": "RFC 6585. Usually triggered by oversized cookies, long Authorization headers, or recursive forwarded headers. Most servers cap total header size around 8KB.",
+    "rfc": "RFC 6585",
+    "typicalCauses": [
+      "Bloated cookies",
+      "Long Authorization header",
+      "X-Forwarded-* chain too deep"
+    ],
+    "isError": true
+  },
+  {
+    "id": "451",
+    "code": 451,
+    "name": "Unavailable For Legal Reasons",
+    "category": "4xx",
+    "description": "Resource is unavailable due to legal restrictions (e.g., GDPR, takedown order).",
+    "longDescription": "RFC 7725. Named after Fahrenheit 451. Used when content is blocked by court order, GDPR, copyright, or government censorship. Should include Link header to a takedown explanation.",
+    "rfc": "RFC 7725",
+    "typicalCauses": [
+      "GDPR geographic restriction",
+      "DMCA takedown",
+      "Court order",
+      "Government censorship"
+    ],
+    "isError": true
+  },
+  {
+    "id": "500",
+    "code": 500,
+    "name": "Internal Server Error",
+    "category": "5xx",
+    "description": "Generic server-side error. The server encountered an unexpected condition.",
+    "longDescription": "RFC 9110 §15.6.1. The catch-all 5xx — the server hit an exception it didn't handle. Always indicates a bug or operational issue server-side. Should never be returned for client errors. Always log with full stack trace.",
+    "rfc": "RFC 9110 §15.6.1",
+    "typicalCauses": [
+      "Unhandled exception",
+      "Database connection failed",
+      "Null pointer / undefined access",
+      "Type error in handler",
+      "Configuration error"
+    ],
+    "isError": true
+  },
+  {
+    "id": "501",
+    "code": 501,
+    "name": "Not Implemented",
+    "category": "5xx",
+    "description": "Server doesn't recognize the request method or lacks the ability to fulfill it.",
+    "longDescription": "RFC 9110 §15.6.2. Server doesn't support the functionality. Different from 405 (which knows the method but not for this resource). Rare in practice.",
+    "rfc": "RFC 9110 §15.6.2",
+    "typicalCauses": [
+      "Unsupported HTTP method (e.g., custom verb)",
+      "Feature not yet built"
+    ],
+    "isError": true
+  },
+  {
+    "id": "502",
+    "code": 502,
+    "name": "Bad Gateway",
+    "category": "5xx",
+    "description": "Server (acting as proxy/gateway) received an invalid response from upstream.",
+    "longDescription": "RFC 9110 §15.6.3. The reverse proxy (nginx, Cloudflare, ALB) couldn't get a valid response from your application. Causes: app crashed, app not listening on expected port, malformed response from upstream, upstream connection reset.",
+    "rfc": "RFC 9110 §15.6.3",
+    "typicalCauses": [
+      "Upstream app crashed",
+      "App not listening",
+      "Connection reset by upstream",
+      "Malformed upstream response",
+      "Wrong upstream port"
+    ],
+    "isError": true
+  },
+  {
+    "id": "503",
+    "code": 503,
+    "name": "Service Unavailable",
+    "category": "5xx",
+    "description": "Server is temporarily unavailable. Often used for maintenance or overload.",
+    "longDescription": "RFC 9110 §15.6.4. The server is overloaded or down for maintenance. Should include Retry-After header. Often returned by load balancers when no healthy upstream is available, or by apps that have circuit breakers tripped.",
+    "rfc": "RFC 9110 §15.6.4",
+    "typicalCauses": [
+      "No healthy upstream",
+      "Maintenance mode",
+      "Circuit breaker open",
+      "Connection pool exhausted",
+      "Auto-scaling lag"
+    ],
+    "isError": true
+  },
+  {
+    "id": "504",
+    "code": 504,
+    "name": "Gateway Timeout",
+    "category": "5xx",
+    "description": "Server (acting as proxy/gateway) timed out waiting for upstream response.",
+    "longDescription": "RFC 9110 §15.6.5. The proxy got tired of waiting for your app. Different from 502 (which is connection-level). Tune both proxy timeouts (nginx proxy_read_timeout, ALB idle timeout) and upstream response time.",
+    "rfc": "RFC 9110 §15.6.5",
+    "typicalCauses": [
+      "Slow upstream response",
+      "Long-running query",
+      "Database lock contention",
+      "Proxy timeout too aggressive"
+    ],
+    "isError": true
+  },
+  {
+    "id": "505",
+    "code": 505,
+    "name": "HTTP Version Not Supported",
+    "category": "5xx",
+    "description": "Server doesn't support the HTTP version used in the request.",
+    "longDescription": "RFC 9110 §15.6.6. Server rejects the protocol version. Rare with modern HTTP/1.1 and HTTP/2 universal support.",
+    "rfc": "RFC 9110 §15.6.6",
+    "typicalCauses": [
+      "Ancient HTTP/1.0 client",
+      "Server forces HTTP/2 only"
+    ],
+    "isError": true
+  },
+  {
+    "id": "507",
+    "code": 507,
+    "name": "Insufficient Storage",
+    "category": "5xx",
+    "description": "Server cannot store the resource. WebDAV, also used for general disk-full conditions.",
+    "longDescription": "RFC 4918 §11.5. Server is out of disk space or write quota. Some non-WebDAV APIs use it for storage quota errors.",
+    "rfc": "RFC 4918 §11.5",
+    "typicalCauses": [
+      "Server disk full",
+      "Storage quota exhausted"
+    ],
+    "isError": true
+  },
+  {
+    "id": "508",
+    "code": 508,
+    "name": "Loop Detected",
+    "category": "5xx",
+    "description": "Server detected an infinite loop while processing the request.",
+    "longDescription": "RFC 5842. WebDAV-originated. The server detected a redirect loop or recursive include cycle.",
+    "rfc": "RFC 5842",
+    "typicalCauses": [
+      "Redirect loop",
+      "Recursive resource references"
+    ],
+    "isError": true
+  },
+  {
+    "id": "511",
+    "code": 511,
+    "name": "Network Authentication Required",
+    "category": "5xx",
+    "description": "Client must authenticate to gain network access (e.g., captive portal).",
+    "longDescription": "RFC 6585. Used by captive portals on hotel/airport WiFi to signal that the client must accept terms or log in before gaining internet access.",
+    "rfc": "RFC 6585",
+    "typicalCauses": [
+      "Captive portal redirect",
+      "Network-level auth gate"
+    ],
+    "isError": true
+  },
+  {
+    "id": "520",
+    "code": 520,
+    "name": "Web Server Returned an Unknown Error",
+    "category": "5xx",
+    "description": "Cloudflare-specific. Origin returned an empty, malformed, or unexpected response.",
+    "longDescription": "Cloudflare 520 means the connection to your origin succeeded but the response was malformed. Common causes: origin app crashed mid-response, RST_STREAM, oversized headers, missing/invalid HTTP status line.",
+    "rfc": "Cloudflare custom",
+    "typicalCauses": [
+      "Origin app crashed mid-response",
+      "Oversized response headers",
+      "RST_STREAM from origin",
+      "Missing HTTP status line"
+    ],
+    "isError": true
+  },
+  {
+    "id": "521",
+    "code": 521,
+    "name": "Web Server Is Down",
+    "category": "5xx",
+    "description": "Cloudflare-specific. Origin server refused the connection.",
+    "longDescription": "Cloudflare 521: TCP connection to origin was refused. Cloudflare's IPs may be firewall-blocked, the origin process is stopped, or the wrong origin port is configured.",
+    "rfc": "Cloudflare custom",
+    "typicalCauses": [
+      "Origin server down",
+      "Cloudflare IPs blocked at firewall",
+      "Wrong origin port"
+    ],
+    "isError": true
+  },
+  {
+    "id": "522",
+    "code": 522,
+    "name": "Connection Timed Out",
+    "category": "5xx",
+    "description": "Cloudflare-specific. Connection to origin timed out (TCP-level).",
+    "longDescription": "Cloudflare 522: Cloudflare couldn't establish a TCP connection to origin within the timeout. Origin overloaded, network ACL blocking Cloudflare, or origin geographically distant from Cloudflare's edge.",
+    "rfc": "Cloudflare custom",
+    "typicalCauses": [
+      "Origin overloaded",
+      "Network ACL blocking Cloudflare",
+      "Origin behind slow link"
+    ],
+    "isError": true
+  },
+  {
+    "id": "524",
+    "code": 524,
+    "name": "A Timeout Occurred",
+    "category": "5xx",
+    "description": "Cloudflare-specific. TCP connection succeeded but origin took >100s to respond.",
+    "longDescription": "Cloudflare 524: TCP handshake completed but no HTTP response within ~100 seconds. Long-running requests need to be moved to background workers, broken into chunks, or use streaming responses.",
+    "rfc": "Cloudflare custom",
+    "typicalCauses": [
+      "Long-running request (>100s)",
+      "Database query takes too long",
+      "Slow third-party API call"
+    ],
+    "isError": true
+  },
+  {
+    "id": "525",
+    "code": 525,
+    "name": "SSL Handshake Failed",
+    "category": "5xx",
+    "description": "Cloudflare-specific. SSL handshake with origin failed.",
+    "longDescription": "Cloudflare 525: SSL/TLS handshake between Cloudflare and origin failed. Common causes: origin SSL cert expired, hostname mismatch, unsupported TLS version, Full (strict) SSL mode without valid origin cert.",
+    "rfc": "Cloudflare custom",
+    "typicalCauses": [
+      "Origin SSL cert expired",
+      "Hostname mismatch",
+      "Unsupported TLS version",
+      "Full (strict) mode without valid cert"
+    ],
+    "isError": true
+  },
+  {
+    "id": "526",
+    "code": 526,
+    "name": "Invalid SSL Certificate",
+    "category": "5xx",
+    "description": "Cloudflare-specific. Origin SSL certificate is invalid.",
+    "longDescription": "Cloudflare 526: Origin presented an SSL cert Cloudflare can't validate (untrusted CA, expired, hostname mismatch). Use Cloudflare Origin CA cert or Full SSL mode (not strict) to bypass for testing.",
+    "rfc": "Cloudflare custom",
+    "typicalCauses": [
+      "Origin cert from untrusted CA",
+      "Expired origin cert",
+      "Self-signed cert with strict mode"
+    ],
+    "isError": true
+  },
+  {
+    "id": "529",
+    "code": 529,
+    "name": "Site Is Overloaded",
+    "category": "5xx",
+    "description": "Anthropic API and others use this for service overload.",
+    "longDescription": "Anthropic Claude API uses 529 for overload errors (overloaded_error). Always retry with exponential backoff and jitter. Not an RFC code; community-defined.",
+    "rfc": "Non-standard",
+    "typicalCauses": [
+      "Anthropic Claude API overloaded",
+      "Service capacity exhausted"
+    ],
+    "isError": true
+  }
+]

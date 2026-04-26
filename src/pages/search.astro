@@ -1,0 +1,122 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Breadcrumb from '../components/Breadcrumb.astro';
+
+const errors = await getCollection('errors');
+const services = await getCollection('services');
+const codes = await getCollection('httpCodes');
+
+const index = [
+  ...errors.filter((e) => !e.data.noindex).map((e) => {
+    const s = services.find((sv) => sv.data.id === e.data.service);
+    return {
+      type: 'error' as const,
+      title: `${s?.data.name ?? e.data.service}: ${e.data.code}`,
+      subtitle: e.data.plainTitle,
+      url: `/${e.data.service}/${e.data.slug}/`,
+      keywords: [e.data.code, s?.data.name ?? '', e.data.plainTitle, ...e.data.keywords].join(' ').toLowerCase(),
+    };
+  }),
+  ...services.map((s) => ({
+    type: 'service' as const,
+    title: s.data.name,
+    subtitle: s.data.tagline,
+    url: `/${s.data.id}/`,
+    keywords: `${s.data.name} ${s.data.tagline} ${s.data.aliases.join(' ')}`.toLowerCase(),
+  })),
+  ...codes.map((c) => ({
+    type: 'http' as const,
+    title: `HTTP ${c.data.code} ${c.data.name}`,
+    subtitle: c.data.description.slice(0, 80),
+    url: `/http/${c.data.code}/`,
+    keywords: `${c.data.code} ${c.data.name} http`.toLowerCase(),
+  })),
+];
+
+const path = '/search/';
+---
+<BaseLayout title="Search — fixerror.dev" description="Search for any error code, service, or HTTP status." path={path} noindex>
+  <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+    <Breadcrumb items={[{ name: 'Home', url: '/' }, { name: 'Search' }]} />
+
+    <h1 class="text-3xl font-bold tracking-tight mb-6">Search</h1>
+
+    <form id="search-form" class="flex items-center bg-[color:var(--color-bg-card)] border border-[color:var(--color-border-strong)] rounded-lg px-4 py-3 mb-6">
+      <span class="text-[color:var(--color-text-dim)] font-mono mr-3 text-lg">/</span>
+      <input
+        id="q"
+        type="search"
+        placeholder="card_declined, 429, ECONNREFUSED..."
+        class="bg-transparent outline-none flex-1 text-base placeholder:text-[color:var(--color-text-dim)]"
+        autocomplete="off"
+        autofocus
+      />
+    </form>
+
+    <div id="hint" class="text-sm text-[color:var(--color-text-muted)]">Type to search. All searches are local — nothing is sent to a server.</div>
+    <ul id="results" class="space-y-2 mt-4"></ul>
+  </div>
+
+  <script type="application/json" id="search-index" set:html={JSON.stringify(index)}></script>
+  <script>
+    const data = JSON.parse(document.getElementById('search-index')!.textContent || '[]');
+    const input = document.getElementById('q') as HTMLInputElement;
+    const list = document.getElementById('results')!;
+    const hint = document.getElementById('hint')!;
+    const params = new URLSearchParams(window.location.search);
+    const initial = params.get('q') || '';
+    if (initial) input.value = initial;
+
+    const TYPE_BADGE: Record<string, string> = {
+      error: 'Error',
+      service: 'Service',
+      http: 'HTTP',
+    };
+
+    function render(query: string) {
+      const q = query.trim().toLowerCase();
+      if (!q) {
+        list.innerHTML = '';
+        hint.style.display = '';
+        return;
+      }
+      hint.style.display = 'none';
+      const tokens = q.split(/\s+/).filter(Boolean);
+      const scored = data
+        .map((item: any) => {
+          let score = 0;
+          for (const t of tokens) {
+            if (item.title.toLowerCase().includes(t)) score += 4;
+            if (item.subtitle.toLowerCase().includes(t)) score += 2;
+            if (item.keywords.includes(t)) score += 1;
+          }
+          return { item, score };
+        })
+        .filter((x: any) => x.score > 0)
+        .sort((a: any, b: any) => b.score - a.score)
+        .slice(0, 30);
+
+      list.innerHTML = scored.length === 0
+        ? '<li class="text-sm text-[color:var(--color-text-muted)]">No results. Try a different keyword.</li>'
+        : scored.map(({ item }: any) => `
+          <li>
+            <a href="${item.url}" class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-3 hover:border-[color:var(--color-accent)]">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-[color:var(--color-bg)] text-[color:var(--color-text-dim)]">${TYPE_BADGE[item.type]}</span>
+                <span class="font-semibold text-sm">${item.title}</span>
+              </div>
+              <div class="text-xs text-[color:var(--color-text-muted)]">${item.subtitle}</div>
+            </a>
+          </li>
+        `).join('');
+    }
+
+    input.addEventListener('input', (e) => render((e.target as HTMLInputElement).value));
+    document.getElementById('search-form')!.addEventListener('submit', (e) => {
+      e.preventDefault();
+      render(input.value);
+    });
+    if (initial) render(initial);
+  </script>
+</BaseLayout>

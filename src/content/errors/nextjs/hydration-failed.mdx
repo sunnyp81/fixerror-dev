@@ -1,0 +1,147 @@
+---
+service: nextjs
+code: hydration_failed
+slug: hydration-failed
+title: "Next.js Error: Hydration failed — Server/Client HTML Mismatch (Cause + Fix)"
+plainTitle: Hydration Failed
+category: runtime
+severity: high
+tldrCause: The HTML React rendered on the server doesn't match what React tries to render on the client during hydration. The two trees disagree about a node, so React throws and falls back to a full client re-render.
+tldrFix: "Find the component that renders different output on server vs client (usually `Date.now()`, `Math.random()`, `typeof window`, browser-only APIs, or invalid HTML nesting), guard the dynamic part with `useEffect`/`useState`, or mark the component `'use client'` with `dynamic(() => …, { ssr: false })`."
+contextCode:
+  language: text
+  filename: console
+  code: |
+    Unhandled Runtime Error
+    Error: Hydration failed because the initial UI does not match what was rendered on the server.
+
+    Warning: Text content did not match. Server: "12:04:07" Client: "12:04:08"
+
+    See more info here: https://nextjs.org/docs/messages/react-hydration-error
+  caption: The browser console shows the offending text and a Next.js docs link. The diff is almost always the actual cause.
+causes:
+  - title: Time, random, or locale-dependent values rendered directly
+    body: "`new Date().toLocaleString()`, `Math.random()`, `Intl.DateTimeFormat` with the user's locale, or `Date.now()` produce different output every render and across server/client. The server renders one value at request time; the client renders a different value milliseconds later."
+  - title: Browser-only APIs read during render
+    body: "Reading `window`, `document`, `localStorage`, `navigator`, or `matchMedia` during render. On the server these are `undefined`, so the component renders one tree there and a different tree in the browser. Same for any code that branches on `typeof window !== 'undefined'`."
+  - title: Invalid HTML nesting
+    body: "`<p><div></div></p>`, `<a><a></a></a>`, `<table>` without `<tbody>`, or `<button>` inside `<button>`. The browser silently rewrites the DOM to make it valid, then React's virtual DOM no longer matches the real DOM. Hydration trips because the structure changed before React got there."
+  - title: Third-party scripts mutating the DOM before hydration
+    body: "Browser extensions (Grammarly, dark-mode injectors, password managers) and inline analytics scripts can add attributes (`data-gramm`, `cz-shortcut-listen`) or wrap nodes before React hydrates. The DOM React inherits no longer matches the server HTML."
+  - title: User-specific data fetched in a Client Component without SSR'd defaults
+    body: "Authenticated user state from `localStorage`, theme preference from a cookie read client-side, or a feature-flag library that resolves on the client. The server renders the unauthenticated tree, the client immediately renders the authenticated one."
+fixes:
+  - title: Move dynamic values into useEffect (render once on client only)
+    likelihood: high
+    body: |
+      For values that legitimately differ between server and client (current time, random IDs, user locale), render a stable placeholder during SSR and the dynamic value after hydration. This is the fix for ~70% of hydration errors.
+    code:
+      language: tsx
+      filename: app/components/Clock.tsx
+      code: |
+        'use client';
+        import { useEffect, useState } from 'react';
+
+        export function Clock() {
+          const [time, setTime] = useState<string | null>(null);
+
+          useEffect(() => {
+            setTime(new Date().toLocaleTimeString());
+            const id = setInterval(
+              () => setTime(new Date().toLocaleTimeString()),
+              1000,
+            );
+            return () => clearInterval(id);
+          }, []);
+
+          // Server + first client render both produce the same placeholder.
+          if (time === null) return <span suppressHydrationWarning>--:--:--</span>;
+          return <span>{time}</span>;
+        }
+  - title: Disable SSR for components that genuinely can't render on the server
+    likelihood: high
+    body: |
+      For components that depend on `window`, charting libraries that measure DOM, or third-party widgets that mutate the DOM, opt out of SSR entirely with `next/dynamic`. The server emits nothing for the component; the client renders it after mount.
+    code:
+      language: tsx
+      filename: app/page.tsx
+      code: |
+        import dynamic from 'next/dynamic';
+
+        const ClientOnlyChart = dynamic(
+          () => import('./Chart').then((m) => m.Chart),
+          { ssr: false, loading: () => <div className="h-64" /> },
+        );
+
+        export default function Page() {
+          return <ClientOnlyChart />;
+        }
+  - title: Fix invalid HTML nesting
+    likelihood: high
+    body: |
+      Run the browser's Elements panel on the SSR'd HTML (View Source, not after hydration) and look for tags the browser silently moved. Common culprits: `<p>` containing block elements, `<a>` inside `<a>`, `<form>` inside `<form>`. Replace `<p>` with `<div>` when you need to nest block content; never wrap an interactive element inside another.
+  - title: Use suppressHydrationWarning for known one-node mismatches
+    likelihood: medium
+    body: |
+      `suppressHydrationWarning` on a single element silences the warning for that one node only — useful for `<time>`, dark-mode `<html className>`, or text content you've intentionally made differ. Do NOT use it as a blanket fix; it just hides the symptom.
+    code:
+      language: tsx
+      filename: app/layout.tsx
+      code: |
+        export default function RootLayout({ children }: { children: React.ReactNode }) {
+          // The theme script in <head> sets className before React hydrates.
+          return (
+            <html lang="en" suppressHydrationWarning>
+              <body>{children}</body>
+            </html>
+          );
+        }
+  - title: Read cookies on the server, pass through props
+    likelihood: medium
+    body: |
+      For theme, locale, or user-specific data, read the cookie/header on the server (in a Server Component or in `getServerSideProps`) and pass it as a prop. Both the server and the first client render then see the same value, eliminating the mismatch.
+detection: |
+  Hydration errors are loud in development (red overlay) but silent in production by default — the console logs a generic message and React falls back to a full re-render, costing TTI and CLS. Add `onRecoverableError` to your `hydrateRoot` (or use Sentry's `BrowserTracing` with React error boundaries) so production hydration mismatches show up in your error tracker. Track hydration error rate as a Core Web Vitals adjacent metric.
+related:
+  - module-not-found-nextjs
+  - function-invocation-timeout-nextjs
+  - failed-to-fetch-nextjs
+  - next-image-error
+  - econnrefused-nodejs
+relatedGuide: nextjs-debugging
+faq:
+  - q: Why does hydration only fail in production and not in development?
+    a: "Usually the opposite — dev shows the loud overlay and prod recovers silently. If yours fails only in prod, the cause is almost always (a) different data between server build time and client run time (build-cached SSG vs live API), (b) a `process.env.NODE_ENV` branch that renders different markup, or (c) a third-party script your dev environment doesn't load. Diff the server HTML (curl with no JS) against the hydrated DOM."
+  - q: "Is `suppressHydrationWarning` a real fix?"
+    a: "No — it silences the warning for one specific node, but if the underlying mismatch is real, React still re-renders the subtree on the client. Use it only when you've verified the mismatch is intentional and harmless (e.g., a timestamp that updates every second, or a theme class set by an inline script before hydration). Treat it like a `// eslint-disable` comment."
+  - q: How do I find which component is causing the hydration mismatch?
+    a: "Open the browser console — Next.js logs the offending text or attribute and a stack trace. Disable browser extensions (especially Grammarly, ColorZilla, and password managers) and reload; if the error disappears, an extension was mutating the DOM. Otherwise, binary-search by commenting out half your component tree and reloading until you isolate the culprit."
+  - q: Does the App Router fix hydration errors automatically?
+    a: "No. Server Components don't hydrate (they render only on the server), so they can't have hydration errors — but the moment you mark a component `'use client'`, you're back in the same hydration model as the Pages Router. Moving dynamic UI into Server Components reduces the surface area but doesn't eliminate the class of errors."
+  - q: "Why does `<a>` inside `<a>` cause a hydration error when the browser still renders it?"
+    a: "Browsers silently un-nest invalid HTML during parsing — your `<a><a></a></a>` becomes two sibling `<a>` tags in the real DOM. React's virtual DOM still has them nested, so when it tries to reconcile, the structure no longer matches and hydration fails. Always validate your HTML against the [W3C nesting rules](https://html.spec.whatwg.org/multipage/dom.html#kinds-of-content)."
+  - q: Can I use cookies/headers on the client to avoid the mismatch?
+    a: "Not directly — by the time client JS runs, you're past the hydration window. The fix is to read the cookie on the server (inside a Server Component, `getServerSideProps`, or middleware) and either render the correct markup directly or pass the value as a prop to a Client Component. Both server and first-client renders then produce identical HTML."
+  - q: Is hydration error a performance problem if it only happens once?
+    a: "Yes — when hydration fails, React falls back to a full client re-render of the subtree, which throws away the SSR benefit. On a slow device that adds 200-500ms to Time to Interactive plus a Cumulative Layout Shift hit. Production hydration errors directly hurt your Core Web Vitals."
+  - q: Will turning off React strict mode hide the error?
+    a: "It might silence development double-rendering warnings but it won't fix actual hydration mismatches — those happen because the SSR'd HTML genuinely doesn't match what client React produces. Strict mode catches *more* bugs; disabling it just means you ship the bug."
+escalate: |
+  Hydration errors are virtually always in your code, not Next.js itself. Before opening a Next.js GitHub issue: (1) reproduce in a fresh Next.js app with the latest version, (2) confirm the issue persists with all browser extensions disabled and in incognito mode, (3) confirm the SSR'd HTML (curl the page) genuinely doesn't match the hydrated DOM. If all three hold, file at github.com/vercel/next.js with a minimal reproduction. Otherwise, the bug is upstream of Next.js (in your component, a third-party library, or a script you load).
+languages:
+  - typescript
+  - javascript
+keywords:
+  - nextjs hydration failed
+  - react hydration error
+  - hydration mismatch
+  - text content did not match
+  - nextjs server client mismatch
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+Hydration is the moment React takes over server-rendered HTML and "wires up" event handlers and state. A hydration error means the HTML the server sent and the HTML React expected to produce on the client don't match. React can't recover that mismatch in place, so it tears down the component subtree and re-renders it from scratch — losing the SSR benefit, causing a layout shift, and (in development) showing a red overlay.
+
+The fix is almost never to suppress the warning. It's to find the source of the mismatch, which is one of five things: time-dependent values, browser-only APIs, invalid HTML nesting, third-party DOM mutation, or user-specific data resolved differently on server and client. Each has a clean pattern.

@@ -1,0 +1,140 @@
+---
+service: postgres
+code: ECONNREFUSED
+slug: econnrefused
+title: 'Postgres Error: ECONNREFUSED — Connection Refused (Cause + Fix)'
+plainTitle: Connection Refused
+category: network
+severity: critical
+tldrCause: Your application tried to open a TCP connection to Postgres and the OS rejected it — Postgres isn't listening on the host:port you specified, or a firewall blocked the connection.
+tldrFix: Verify Postgres is running (`pg_isready -h <host> -p <port>`), the host/port in your connection string is correct, and nothing (firewall, security group, network ACL) is blocking the connection from your app's network.
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    Error: connect ECONNREFUSED 127.0.0.1:5432
+        at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1607:16) {
+      errno: -111,
+      code: 'ECONNREFUSED',
+      syscall: 'connect',
+      address: '127.0.0.1',
+      port: 5432
+    }
+causes:
+  - title: Postgres isn't running
+    body: "The most common cause locally — `postgres` service stopped, container exited, or systemd unit failed. Production: pod evicted, crash-looped, or the standby never promoted after primary failure."
+  - title: Wrong host or port in connection string
+    body: 'Pointing at `localhost` from inside a container (where the DB is on the host or in another container), wrong port (default 5432, but Postgres can run on any port), or DNS resolution returning the wrong A record.'
+  - title: 'pg_hba.conf only listens on localhost'
+    body: 'Default Postgres binds to `127.0.0.1` only. To accept remote connections you also need `listen_addresses = ''*''` in `postgresql.conf` AND a matching `host` line in `pg_hba.conf`.'
+  - title: Firewall, security group, or network ACL blocking
+    body: 'Cloud DBs default to no public ingress. Connecting from outside the VPC needs explicit security-group rules. Local connections can be blocked by `iptables`, `ufw`, or Windows Firewall.'
+  - title: Connection pool exhausted upstream of Postgres
+    body: 'PgBouncer or RDS Proxy in front of Postgres can refuse connections (sometimes as ECONNREFUSED rather than a clean error) when its pool is saturated. Looks like Postgres is down even though it''s healthy.'
+fixes:
+  - title: Confirm Postgres is up and listening
+    likelihood: high
+    body: |
+      Use `pg_isready` (ships with Postgres client tools) to check both the network path and Postgres' internal readiness. It distinguishes "no TCP" (ECONNREFUSED) from "TCP up but Postgres rejecting" (auth/SSL).
+    code:
+      language: bash
+      filename: check.sh
+      code: |
+        # From the host trying to connect:
+        pg_isready -h db.example.com -p 5432
+        # /var/run/postgresql:5432 - accepting connections   ← good
+        # localhost:5432 - no response                       ← ECONNREFUSED
+
+        # If pg_isready fails: check Postgres process locally
+        sudo systemctl status postgresql
+        sudo ss -tlnp | grep 5432
+  - title: Verify the connection string is what you think it is
+    likelihood: high
+    body: |
+      Print the resolved DSN (with password redacted) at startup. Misconfigured env vars are responsible for an embarrassing share of ECONNREFUSED reports. Inside Docker, `localhost` means the container itself, not the host — use the service name from compose, or `host.docker.internal` on Mac/Windows Docker Desktop.
+    code:
+      language: javascript
+      filename: pool.js
+      code: |
+        import { Pool } from 'pg';
+
+        const pool = new Pool({
+          host: process.env.PGHOST,
+          port: Number(process.env.PGPORT ?? 5432),
+          database: process.env.PGDATABASE,
+          user: process.env.PGUSER,
+          password: process.env.PGPASSWORD,
+        });
+
+        console.log('postgres connection target:', {
+          host: process.env.PGHOST,
+          port: process.env.PGPORT,
+          database: process.env.PGDATABASE,
+          user: process.env.PGUSER,
+          // never log password
+        });
+  - title: Open `listen_addresses` and `pg_hba.conf` for remote access
+    likelihood: medium
+    body: |
+      Two files, both must change. After editing, `SELECT pg_reload_conf();` or restart Postgres.
+    code:
+      language: text
+      filename: postgresql.conf
+      code: |
+        listen_addresses = '*'        # or specific IPs
+        port = 5432
+    caption: Then add a matching line in pg_hba.conf
+  - title: Open the firewall / security group on port 5432
+    likelihood: medium
+    body: |
+      AWS RDS: edit the DB's security group to allow inbound TCP 5432 from your app's security group. Linux: `sudo ufw allow 5432/tcp` or matching `iptables`. Windows: Windows Defender Firewall → Inbound Rules. Cloud: VPC Network ACLs may also need updating, but rarely.
+  - title: If using PgBouncer, check pool saturation
+    likelihood: low
+    body: |
+      `SHOW POOLS;` and `SHOW CLIENTS;` against the PgBouncer admin DB. If `cl_waiting` is non-zero and Postgres is healthy, PgBouncer is the bottleneck — increase `default_pool_size` or scale Postgres connection capacity.
+detection: |
+  Health-check against Postgres at the network layer (`pg_isready`) and the SQL layer (`SELECT 1`) separately. Alert on the network check first — that's a different failure (network/host) from the SQL check (auth/permission/lock). Track ECONNREFUSED rate per app instance; a single instance failing while others succeed points at that instance's network rather than Postgres being down.
+related:
+  - too-many-connections
+  - password-authentication-failed
+  - ssl-required
+  - connection-terminated-unexpectedly
+  - 53300-too-many-connections-postgres
+relatedHttp: 503
+relatedGuide: database-connection-debugging
+faq:
+  - q: What's the difference between ECONNREFUSED and ETIMEDOUT?
+    a: 'ECONNREFUSED = host actively rejected the connection (Postgres not running, port closed). ETIMEDOUT = no reply at all (host unreachable, firewall silently dropping packets, network partition). ECONNREFUSED is faster to fail; ETIMEDOUT means you waited the OS connect timeout (~75s on Linux).'
+  - q: Why does ECONNREFUSED only happen from my app and not from psql on the DB host?
+    a: 'Almost always a network issue. `psql` from the DB host uses the loopback interface, which bypasses firewall rules. Your app on a different host (or in a container) hits the network firewall. Run `pg_isready` from the app''s exact origin to reproduce.'
+  - q: I get ECONNREFUSED from inside Docker even though Postgres is running on my Mac.
+    a: 'Inside Docker, `localhost` means the container, not your Mac. Use `host.docker.internal` (Docker Desktop) or `--network host` (Linux), or run Postgres in a container too and connect by service name in docker-compose.'
+  - q: My RDS instance returns ECONNREFUSED — is the database down?
+    a: 'Almost certainly not. RDS is up but its security group isn''t letting you in. Check: (a) DB''s security group has an inbound rule for TCP 5432 from your app''s security group, (b) DB is in the same VPC or VPC peering is configured, (c) for public access, the DB has Publicly Accessible: Yes and a route to an internet gateway.'
+  - q: Postgres is on port 5432 but I get ECONNREFUSED. Is something else listening?
+    a: 'Maybe. Run `sudo ss -tlnp | grep 5432` (Linux) or `lsof -i :5432` (Mac) on the DB host. If nothing shows, Postgres isn''t bound to that port. If something else is bound (rare), you''ll need to move Postgres or the conflicting service.'
+  - q: Should I retry on ECONNREFUSED?
+    a: 'Yes — but with bounds. ECONNREFUSED is often transient during DB restarts or failovers. Retry with exponential backoff for ~30 seconds, then fail fast and surface the error. Don''t retry forever; you''ll mask outages from your monitoring.'
+  - q: Can a connection pool cause ECONNREFUSED?
+    a: 'Not directly — pools cause "too many connections" errors, not ECONNREFUSED. But PgBouncer in front of Postgres can refuse new connections when its own pool is saturated, surfacing as ECONNREFUSED on the app side. Check PgBouncer''s `SHOW POOLS;` to confirm.'
+  - q: Does ECONNREFUSED indicate a Postgres bug?
+    a: 'Almost never. It''s a network or operational issue 99% of the time — Postgres not started, wrong host, firewall, or connection-pool middleware. Postgres-side issues usually surface as authentication errors, "database does not exist," or "too many connections" — all of which are returned over an established TCP connection.'
+escalate: |
+  If Postgres logs show clean accept/reject patterns but the network layer is silent, escalate to your network team or cloud provider — that points at SG/NACL/route-table issues. If you're on managed Postgres (RDS, Cloud SQL, Heroku) and the provider's status page shows green but you can't connect, open a support ticket with your DB instance ID and a tcpdump from your app side.
+languages:
+  - javascript
+  - python
+  - go
+  - ruby
+keywords:
+  - postgres econnrefused
+  - postgres connection refused
+  - postgresql cannot connect
+  - psql connect refused
+  - rds econnrefused
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`ECONNREFUSED` isn't a Postgres error — it's an operating-system error returned to your app's TCP stack when Postgres (or whatever's at the other end of your connection string) actively refused the connection. That distinction matters: ECONNREFUSED is debugged from the network layer up, not from inside Postgres.

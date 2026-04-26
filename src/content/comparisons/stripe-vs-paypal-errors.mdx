@@ -1,0 +1,49 @@
+---
+serviceA: stripe
+serviceB: paypal
+slug: stripe-vs-paypal-errors
+title: 'Stripe vs PayPal: Error Codes Compared (2026)'
+description: 'Side-by-side comparison of how Stripe and PayPal surface payment errors — decline reasons, webhook signatures, idempotency, and rate limits.'
+intro: 'Both Stripe and PayPal process billions in payments, but their error semantics diverge in ways that bite developers migrating between them or supporting both. This page maps the equivalent error codes side-by-side.'
+keyDifferences:
+  - area: Decline reasons
+    a: 'Granular: 30+ decline_code values (insufficient_funds, lost_card, do_not_honor, etc.) on top of card_declined.'
+    b: 'Coarse: a handful of high-level errors (PAYER_CANNOT_PAY, INSTRUMENT_DECLINED, PAYEE_BLOCKED). Reasons sometimes only visible in PayPal dashboard.'
+  - area: Webhook signature
+    a: 'HMAC-SHA256 with timestamp, verified via Stripe-Signature header. Rejects replay attacks via 5-min tolerance.'
+    b: 'Asymmetric (PayPal signs with their cert, you verify against their public key). More moving parts, more failure modes.'
+  - area: Idempotency
+    a: 'Idempotency-Key header on any POST. Replays same response for 24h.'
+    b: 'PayPal-Request-Id header. Idempotency window varies by API.'
+  - area: Rate limits
+    a: '100 RPS read / 100 RPS write per account. 429 with Retry-After.'
+    b: 'No documented hard rate limit; throttling kicks in but limit isn''t published. Errors as 429 or 500.'
+  - area: 3D Secure / SCA
+    a: 'PaymentIntents with automatic SCA. Returns requires_action with next_action URL.'
+    b: 'SCA handled in the PayPal-hosted flow — your integration sees the result, not the in-progress challenge.'
+  - area: Test mode
+    a: 'Separate test API keys. Real card numbers rejected; specific test cards trigger specific errors.'
+    b: 'Sandbox uses separate environment + sandbox accounts. Test buyers/sellers required.'
+sharedErrors:
+  - pattern: Card declined
+    aCode: 'card_declined (with decline_code: insufficient_funds)'
+    bCode: 'INSTRUMENT_DECLINED'
+    note: 'Stripe gives you the decline_code; PayPal usually does not. Surface a generic "try another method" message on PayPal.'
+  - pattern: Webhook signature mismatch
+    aCode: 'No signatures matching the expected signature were found'
+    bCode: 'VALIDATION_ERROR (verify-webhook-signature)'
+    note: 'Both can fail when payload is mutated by middleware. Verify against the raw body, not the parsed JSON.'
+  - pattern: Rate limit
+    aCode: 'rate_limit (HTTP 429)'
+    bCode: 'RATE_LIMIT_REACHED (HTTP 429)'
+    note: 'Both honour Retry-After. Stripe is more transparent about quotas.'
+  - pattern: Authentication
+    aCode: 'authentication_required (live key in test, expired, etc.)'
+    bCode: 'AUTHENTICATION_FAILURE (invalid client_id/secret)'
+    note: 'Stripe uses static API keys; PayPal uses OAuth bearer tokens that expire (~9h). Token refresh logic is a common PayPal gotcha.'
+publishedAt: 2026-04-26
+---
+
+When you support both Stripe and PayPal, you're maintaining two parallel error catalogues with overlapping but non-identical semantics. The biggest gotcha: Stripe is unusually generous with decline metadata (`decline_code: insufficient_funds`), while PayPal often returns only a generic `INSTRUMENT_DECLINED` and forces customers to investigate via PayPal directly.
+
+For new integrations, lean on Stripe's structured errors for in-app messaging and treat PayPal as a "send the customer to PayPal to resolve" pattern.

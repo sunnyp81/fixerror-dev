@@ -1,0 +1,136 @@
+---
+service: stripe
+code: insufficient_funds
+slug: insufficient-funds
+title: "Stripe Error: insufficient_funds — Card Has Insufficient Funds (Cause + Fix)"
+plainTitle: Card Has Insufficient Funds
+httpStatus: 402
+category: billing
+severity: medium
+tldrCause: "The customer's card issuer declined the charge because the account doesn't have enough available balance to cover the amount, including any pending authorisations and holds."
+tldrFix: "Show the customer a clear message explaining the card lacks funds, prompt them to use a different payment method, and only retry the same card after they confirm funds were added. Don't auto-retry on a fixed schedule."
+contextCode:
+  language: javascript
+  filename: charge.js
+  code: |
+    try {
+      const intent = await stripe.paymentIntents.create({
+        amount: 9999,
+        currency: 'gbp',
+        payment_method: 'pm_card_visa_chargeDeclinedInsufficientFunds',
+        confirm: true,
+      });
+    } catch (err) {
+      // err.type === 'StripeCardError'
+      // err.code === 'card_declined'
+      // err.decline_code === 'insufficient_funds'
+      // err.message === 'Your card has insufficient funds.'
+    }
+  caption: "Stripe surfaces `insufficient_funds` as a `decline_code` on a `card_declined` error — read both fields to route the response correctly."
+causes:
+  - title: Customer's available balance is below the charge amount
+    body: "The most literal cause — the card's account simply doesn't hold enough money. Note this is *available* balance, not posted balance: pending transactions, holds, and authorisations all reduce the spendable total even if the customer's app shows a higher number."
+  - title: Daily or weekly spend cap on the card
+    body: "Many debit cards (especially in the UK and EU) have configurable daily limits that the cardholder may not realise are set. The bank returns `insufficient_funds` even though the account has the money, because the limit is exhausted."
+  - title: Pending authorisation hold consuming the balance
+    body: "An earlier authorisation (hotel deposit, fuel pump pre-auth, subscription pre-charge) is still holding funds. Stripe's charge can't go through until the prior auth is captured or released, which can take 7-30 days for some merchants."
+  - title: Currency conversion buffer leaving customer short
+    body: "When the card is denominated in a different currency to the charge, the issuer reserves a buffer (usually 5-10%) on top of the converted amount to absorb FX moves. A customer with £100 may fail a £95 charge in EUR if the buffer pushes the reservation over £100."
+  - title: Prepaid or gift card with no top-up
+    body: "Prepaid cards return `insufficient_funds` once the balance is spent. Unlike a regular debit card, they can't be auto-topped-up, so retrying is pointless until the customer reloads."
+fixes:
+  - title: "Show a specific, actionable message — don't say 'Card declined'"
+    likelihood: high
+    body: |
+      The customer needs to know *why* the charge failed and *what to do next*. A vague "Card declined" message kills conversion. For `insufficient_funds` specifically, the right copy is honest about the cause and offers two clear next steps: try another card, or top up and retry.
+    code:
+      language: javascript
+      filename: showDeclineMessage.js
+      code: |
+        function declineMessage(err) {
+          if (err.code !== 'card_declined') return 'Payment failed. Please try again.';
+          switch (err.decline_code) {
+            case 'insufficient_funds':
+              return "Your card doesn't have enough available balance for this purchase. Try another card, or add funds and retry.";
+            case 'do_not_honor':
+              return 'Your bank declined the charge. Contact your bank or use another card.';
+            default:
+              return 'Your card was declined. Please try a different card.';
+          }
+        }
+  - title: Offer an alternative payment method on the same checkout
+    likelihood: high
+    body: |
+      Customers who hit `insufficient_funds` are 3-5x more likely to convert if you immediately offer a second payment method (Apple Pay, Klarna, BACS, another card) on the same screen. The Stripe Payment Element supports multiple methods natively — enable at least 2-3 alternatives in your Dashboard's Payment Methods settings.
+    code:
+      language: javascript
+      filename: paymentElement.js
+      code: |
+        const elements = stripe.elements({ clientSecret });
+        const paymentElement = elements.create('payment', {
+          layout: 'tabs',
+          // Stripe automatically shows alternatives based on country + currency
+          paymentMethodOrder: ['card', 'apple_pay', 'google_pay', 'klarna'],
+        });
+        paymentElement.mount('#payment-element');
+  - title: Treat insufficient_funds as a soft decline — allow customer-initiated retry
+    likelihood: medium
+    body: |
+      Unlike `lost_card` or `stolen_card` (hard declines, never retry), `insufficient_funds` is a soft decline: the card is fine, the balance just isn't there right now. Allow the customer to retry whenever they want, but never auto-retry without their consent — chargebacks for unauthorised re-attempts are a real risk.
+  - title: For subscriptions, enable Stripe Smart Retries
+    likelihood: medium
+    body: |
+      Stripe Billing's Smart Retries machine-learn the optimal retry schedule per card and per decline code. For `insufficient_funds`, Stripe typically retries 3-5 days later when payday cycles are most likely. Enable in Dashboard → Billing → Subscriptions → Recovery → Smart Retries.
+  - title: Test with Stripe's `insufficient_funds` test card
+    likelihood: low
+    body: |
+      Use card number `4000000000009995` in test mode to reliably trigger `insufficient_funds`. Build an automated test that asserts your decline-handling code surfaces the right message and offers an alternative payment method.
+detection: |
+  Track `insufficient_funds` separately from other `card_declined` reasons in your monitoring. A sudden rise can indicate (a) you've started charging customers with auth holds from your own previous transactions, (b) an FX rate move is pushing customers over the edge, or (c) a checkout pricing change has crossed a typical balance threshold. Alert if `insufficient_funds` exceeds 3% of attempts over a rolling 24-hour window.
+related:
+  - card-declined
+  - authentication-required
+  - api-key-invalid
+  - signature-verification-failed
+  - rate-limit-exceeded
+relatedHttp: 402
+relatedGuide: handling-payment-declines
+faq:
+  - q: "Is `insufficient_funds` a hard decline or a soft decline?"
+    a: "Soft. The card itself is valid and active — the customer just doesn't have enough balance right now. They can retry the same card later once funds are available. This is unlike hard declines (`lost_card`, `stolen_card`, `pickup_card`) where the card is permanently blocked."
+  - q: "Should I auto-retry an `insufficient_funds` decline?"
+    a: "Not for one-off purchases — wait for the customer to initiate a retry. For subscription invoices, enable Stripe Billing Smart Retries which learns optimal retry timing. Auto-retrying one-off payments without consent risks customer complaints and chargebacks."
+  - q: "Why does `insufficient_funds` happen even when the customer says they have money?"
+    a: "Available balance ≠ posted balance. Pending authorisations (hotel deposits, fuel pump pre-auths, subscription holds) reduce spendable funds even though the customer's banking app may still show the higher figure. Currency conversion buffers and daily spend caps also commonly trigger it."
+  - q: "Does `insufficient_funds` count toward my Stripe decline rate?"
+    a: "Yes. Stripe tracks all `card_declined` decline codes (including `insufficient_funds`) in your decline rate. A sustained high decline rate can attract Stripe Risk review, even though `insufficient_funds` itself is benign and not fraud-related."
+  - q: "Can I see how often customers retry successfully after `insufficient_funds`?"
+    a: "Yes — link your retry attempts via `metadata.original_payment_intent` and query Stripe Sigma or your own logs. Industry average for customer-initiated retry success on `insufficient_funds` is 30-45% within 7 days, much lower after that."
+  - q: "Is `insufficient_funds` ever a fraud indicator?"
+    a: "Rarely. Fraudsters typically hit `do_not_honor` or `pickup_card` because stolen cards get flagged or run dry from prior fraud spend. `insufficient_funds` from a long-time customer is almost always genuinely about their balance."
+  - q: "How does `insufficient_funds` interact with 3D Secure?"
+    a: "3DS authenticates the cardholder; it doesn't check funds. A card can pass 3DS authentication and still decline as `insufficient_funds` immediately afterwards. Always handle the decline path even when 3DS succeeded."
+  - q: "What's the difference between `insufficient_funds` from Stripe and from a bank statement?"
+    a: "Same root cause — issuer says no funds available — but Stripe normalises the wire-protocol decline reason (ISO 8583 code 51) into the friendly string `insufficient_funds`. Bank statements may show 'NSF' (non-sufficient funds) for the same event."
+escalate: |
+  Stripe support can't reverse an `insufficient_funds` decline — it's between the customer and their issuer. Escalate only if (a) you see a sudden cluster of `insufficient_funds` from a single BIN range, suggesting an issuer outage, or (b) Smart Retries aren't firing for subscriptions despite being enabled. For everything else, route the user to retry or pick a different payment method.
+languages:
+  - javascript
+  - python
+  - ruby
+  - php
+  - go
+keywords:
+  - stripe insufficient_funds
+  - stripe insufficient funds error
+  - card declined insufficient funds
+  - stripe decline_code insufficient_funds
+  - stripe payment failed funds
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`insufficient_funds` is the most common reason a Stripe `card_declined` error fires. It means the issuing bank checked the customer's available balance, found it less than the amount you tried to charge, and refused authorisation. Stripe didn't decline — the bank did. Your job is to surface the right message and let the customer recover gracefully without losing the sale.
+
+The trick with `insufficient_funds` is that it lies somewhere between fraud declines (where you should never retry) and processing errors (where you should retry quickly). Treat it as a temporary state on a valid card: tell the customer clearly, offer an alternative payment method on the same screen, and if they retry on their own initiative later, let them.

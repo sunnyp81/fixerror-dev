@@ -1,0 +1,145 @@
+---
+service: openai
+code: rate_limit_exceeded
+slug: rate-limit-exceeded
+title: 'OpenAI Error: rate_limit_exceeded — Too Many Requests (Cause + Fix)'
+plainTitle: Too Many Requests
+httpStatus: 429
+category: rate-limit
+severity: high
+tldrCause: Your account has exceeded its per-minute request (RPM) or per-minute token (TPM) limit for the model you're calling. Limits are tier-based and per-model.
+tldrFix: Read the `Retry-After` header (or default to exponential backoff with jitter starting at 1s), reduce request rate or token usage, and request a tier upgrade if you hit the limit consistently. Don't retry instantly.
+contextCode:
+  language: python
+  filename: openai_call.py
+  code: |
+    import openai
+
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+    except openai.RateLimitError as e:
+        # e.status_code == 429
+        # e.code == 'rate_limit_exceeded'
+        # e.message includes 'Rate limit reached for ... in organization ...'
+        retry_after = int(e.response.headers.get('Retry-After', '60'))
+causes:
+  - title: Burst of concurrent requests
+    body: 'Most rate-limit hits come from sudden bursts — a deployment kicking off worker pods, a batch job retrying simultaneously, or a user-facing feature getting linked on Hacker News. The 60s rolling window means even a 1-second spike can trigger 429s for the rest of the minute.'
+  - title: Token-per-minute (TPM) ceiling, not request count
+    body: 'OpenAI enforces both RPM (requests/min) and TPM (tokens/min). On `gpt-4o`, tier 1 is 500 RPM but 30,000 TPM. A few long prompts can blow TPM while RPM is still healthy. The error message tells you which limit you hit.'
+  - title: Streaming requests counting toward concurrent limits
+    body: 'Streaming responses hold a connection open for the full generation. If you spawn many streaming requests in parallel, you can hit per-org concurrent limits before RPM/TPM, with the same `rate_limit_exceeded` code.'
+  - title: Wrong tier for the model
+    body: 'Limits scale with usage tier (free, tier 1, tier 2, …, tier 5). New accounts on free tier have very low caps for `gpt-4o`. You can only move up tiers by paying and waiting; you can''t request an exception.'
+fixes:
+  - title: Honour the `Retry-After` header with exponential backoff + jitter
+    likelihood: high
+    body: |
+      OpenAI returns a `Retry-After` header (seconds) on 429s. Wait at least that long, then retry with exponential backoff and jitter to avoid thundering herds when many clients retry simultaneously.
+    code:
+      language: python
+      filename: retry.py
+      code: |
+        import time, random
+        from openai import OpenAI, RateLimitError
+
+        client = OpenAI()
+
+        def call_with_retry(messages, model="gpt-4o", max_attempts=5):
+            for attempt in range(max_attempts):
+                try:
+                    return client.chat.completions.create(
+                        model=model, messages=messages
+                    )
+                except RateLimitError as e:
+                    if attempt == max_attempts - 1:
+                        raise
+                    retry_after = int(e.response.headers.get('Retry-After', 0))
+                    backoff = max(retry_after, 2 ** attempt)
+                    jitter = random.uniform(0, backoff * 0.25)
+                    time.sleep(backoff + jitter)
+  - title: Add a client-side token bucket to smooth bursts
+    likelihood: high
+    body: |
+      Pre-emptively rate-limit yourself at slightly under the OpenAI quota using a token bucket. This converts spikes into queues instead of 429s — much better UX than retrying after a failure.
+    code:
+      language: python
+      filename: bucket.py
+      code: |
+        from limits import storage, strategies, parse
+        store = storage.MemoryStorage()
+        limiter = strategies.MovingWindowRateLimiter(store)
+        rule = parse("450/minute")  # 90% of tier-1 RPM cap
+
+        def allow(key="openai"):
+            return limiter.hit(rule, key)
+  - title: Switch large batches to the Batch API
+    likelihood: high
+    body: |
+      For non-real-time work (>50% of LLM use), the [Batch API](https://platform.openai.com/docs/guides/batch) gives you 50% off and a separate, much higher rate limit. Trade 24h latency for big throughput.
+  - title: Count tokens before sending
+    likelihood: medium
+    body: |
+      Use `tiktoken` to count input + max_output tokens before sending. If you'd push over the per-request or per-minute cap, queue or downgrade to a smaller model. This is faster than catching a 429 and retrying.
+    code:
+      language: python
+      filename: count.py
+      code: |
+        import tiktoken
+
+        def count_tokens(messages, model="gpt-4o"):
+            enc = tiktoken.encoding_for_model(model)
+            return sum(len(enc.encode(m["content"])) for m in messages) + 4 * len(messages)
+  - title: Request a tier upgrade or reach out to support
+    likelihood: medium
+    body: |
+      Most OpenAI rate-limit pain disappears at tier 2+ ($50+ paid + 7 days). For sustained production load, your app should already be on tier 3+. Tier upgrades are automatic — there's no form to fill out.
+detection: |
+  Track 429s as a metric, not just a log. Alarm if rate-limit errors exceed 1% of total requests over a 5-minute window. Add a tag for which model and which limit (RPM vs TPM) — they need different fixes. Send a Slack alert on tier-saturation events so you know to upgrade before users feel it.
+related:
+  - insufficient-quota
+  - context-length-exceeded
+  - timeout-openai
+  - api-error-openai
+  - rate-limit-error-anthropic
+relatedHttp: 429
+relatedGuide: handling-rate-limits
+faq:
+  - q: 'What''s the difference between `rate_limit_exceeded` and `insufficient_quota`?'
+    a: '`rate_limit_exceeded` (429) means you''re sending too fast — wait and retry. `insufficient_quota` (429 with different code) means you''ve run out of paid credit or hit your hard usage cap — retrying won''t help, you need to add billing or raise your monthly limit in the dashboard.'
+  - q: How do I see my current OpenAI rate limit?
+    a: 'Every successful response includes `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests`, `x-ratelimit-reset-requests`, and the same trio for tokens. Log these in production to see how close you''re running to the ceiling. The dashboard at platform.openai.com/account/limits shows the per-model limits for your tier.'
+  - q: Does retry-after of 0 mean I can retry immediately?
+    a: 'No. A 0 or missing `Retry-After` should be treated as "retry with exponential backoff starting at 1s." Some 429s have no `Retry-After` because the limit is a rolling window — there''s no fixed reset time, just "soon."'
+  - q: 'Why do I get 429 even though my RPM is well under the limit?'
+    a: 'You''re probably hitting the TPM (tokens per minute) limit, not RPM. On gpt-4o tier 1, RPM is 500 but TPM is only 30k — a single 4k-token prompt every 0.5s already saturates TPM. Check `x-ratelimit-remaining-tokens` to confirm.'
+  - q: Will OpenAI grant a rate-limit exception for production traffic?
+    a: 'Generally no. Limits are tied to usage tier; there''s no manual exception. The fastest path is to spend more (which auto-upgrades your tier after a 7-day cooldown) or to spread load via the Batch API for non-realtime workloads.'
+  - q: Should I retry a streaming request that hit 429 mid-stream?
+    a: 'A 429 mid-stream is rare but possible during multi-region rate-limit propagation. Treat it like any other 429 — wait `Retry-After`, then retry from scratch (you can''t resume mid-completion).'
+  - q: Do failed requests count toward my rate limit?
+    a: 'Requests that hit 429 do *not* count against your token usage. But requests that error after partial streaming (e.g., disconnect mid-stream) do consume the tokens generated up to that point. Always tear down streams cleanly on errors to avoid token waste.'
+  - q: Can I share a rate-limit pool across multiple API keys?
+    a: 'Yes — limits are at the *organization* level, not the API key level. All keys in your org share one pool. To isolate teams, create separate organizations under your OpenAI account.'
+escalate: |
+  Open a support ticket only if (a) the error persists for hours with no traffic on your side, (b) `x-ratelimit-remaining-requests` shows headroom but you still get 429, or (c) you suspect a billing/tier sync issue (e.g., you paid but tier didn't update after 7 days). For routine "I want a higher limit," there's nothing support can do — only paying more works.
+languages:
+  - python
+  - javascript
+  - go
+  - ruby
+keywords:
+  - openai rate limit
+  - openai 429
+  - rate_limit_exceeded
+  - openai too many requests
+  - openai TPM limit
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+OpenAI's `rate_limit_exceeded` is HTTP 429 with the structured error code `rate_limit_exceeded`. It's the single most common production error developers hit when integrating OpenAI APIs, especially after a feature launch or traffic spike. The fix is almost never to retry harder — it's to be smarter about when and how you call the API.

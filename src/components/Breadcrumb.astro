@@ -1,0 +1,20 @@
+---
+interface Props {
+  items: Array<{ name: string; url?: string }>;
+}
+const { items } = Astro.props;
+---
+<nav aria-label="Breadcrumb" class="text-xs text-[color:var(--color-text-dim)] mb-4">
+  <ol class="flex flex-wrap items-center gap-1.5">
+    {items.map((item, i) => (
+      <li class="flex items-center gap-1.5">
+        {i > 0 && <span class="text-[color:var(--color-text-dim)]">/</span>}
+        {item.url ? (
+          <a href={item.url} class="hover:text-[color:var(--color-accent)]">{item.name}</a>
+        ) : (
+          <span class="text-[color:var(--color-text-muted)]">{item.name}</span>
+        )}
+      </li>
+    ))}
+  </ol>
+</nav>

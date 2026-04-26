@@ -1,0 +1,163 @@
+---
+import { getCollection, getEntry, render } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import TLDR from '../../components/TLDR.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+import FAQ from '../../components/FAQ.astro';
+import RelatedErrors from '../../components/RelatedErrors.astro';
+import Sentry from '../../components/Sentry.astro';
+import { SITE, errorTitle, errorDescription, canonical } from '../../lib/seo';
+import {
+  breadcrumbSchema,
+  techArticleSchema,
+  howToSchema,
+  faqPageSchema,
+} from '../../lib/schema';
+
+export async function getStaticPaths() {
+  const errors = await getCollection('errors');
+  const services = await getCollection('services');
+  return errors.map((e) => {
+    const service = services.find((s) => s.data.id === e.data.service);
+    return {
+      params: { service: e.data.service, code: e.data.slug },
+      props: { entry: e, service },
+    };
+  });
+}
+
+const { entry, service } = Astro.props;
+const data = entry.data;
+const { Content } = await render(entry);
+
+const serviceName = service?.data.name ?? data.service;
+const path = `/${data.service}/${data.slug}/`;
+const url = canonical(path);
+const title = errorTitle({
+  serviceName,
+  code: data.code,
+  plainTitle: data.plainTitle,
+});
+const description = errorDescription({
+  serviceName,
+  code: data.code,
+  tldrCause: data.tldrCause,
+});
+
+const breadcrumb = [
+  { name: 'Home', url: '/' },
+  { name: serviceName, url: `/${data.service}/` },
+  { name: data.code, url: path },
+];
+
+const jsonLd = [
+  breadcrumbSchema(breadcrumb),
+  techArticleSchema({
+    headline: title,
+    description,
+    url,
+    datePublished: data.publishedAt,
+    dateModified: data.updatedAt,
+    keywords: data.keywords,
+    about: `${serviceName} ${data.code}`,
+  }),
+  howToSchema({
+    name: `How to fix ${serviceName} ${data.code}`,
+    description: data.tldrFix,
+    steps: data.fixes.map((f) => ({ name: f.title, text: f.body })),
+  }),
+  faqPageSchema(data.faq),
+];
+---
+<BaseLayout
+  title={title}
+  description={description}
+  path={path}
+  noindex={data.noindex}
+  jsonLd={jsonLd}
+>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_auto] gap-12">
+      <article class="prose">
+        <Breadcrumb items={breadcrumb} />
+
+        <div class="not-prose flex flex-wrap items-center gap-2 mb-3 text-xs">
+          <span class="font-mono px-2 py-0.5 rounded-md bg-[color:var(--color-bg-card)] border border-[color:var(--color-border)] text-[color:var(--color-text-muted)] uppercase tracking-wider">{serviceName}</span>
+          {data.httpStatus && (
+            <a href={`/http/${data.httpStatus}/`} class="font-mono px-2 py-0.5 rounded-md bg-[color:var(--color-bg-card)] border border-[color:var(--color-border)] text-[color:var(--color-accent)] hover:border-[color:var(--color-accent)]">HTTP {data.httpStatus}</a>
+          )}
+          <span class="font-mono px-2 py-0.5 rounded-md bg-[color:var(--color-bg-card)] border border-[color:var(--color-border)] text-[color:var(--color-text-muted)] capitalize">{data.category}</span>
+        </div>
+
+        <h1>{serviceName} Error: <code>{data.code}</code> — {data.plainTitle}</h1>
+
+        <TLDR cause={data.tldrCause} fix={data.tldrFix} />
+
+        {data.contextCode && (
+          <CodeBlock
+            code={data.contextCode.code}
+            language={data.contextCode.language}
+            filename={data.contextCode.filename}
+            caption={data.contextCode.caption}
+          />
+        )}
+
+        <Content />
+
+        <h2 id="why-this-happens">Why this happens</h2>
+        <ul>
+          {data.causes.map((c) => (
+            <li>
+              <strong>{c.title}.</strong> {c.body}
+            </li>
+          ))}
+        </ul>
+
+        <h2 id="how-to-fix-it">How to fix it</h2>
+        <p>Fixes are ordered by likelihood. Start with the first one that matches your context.</p>
+        {data.fixes.map((f, i) => (
+          <div>
+            <h3>{i + 1}. {f.title}</h3>
+            <p>{f.body}</p>
+            {f.code && (
+              <CodeBlock
+                code={f.code.code}
+                language={f.code.language}
+                filename={f.code.filename}
+                caption={f.code.caption}
+              />
+            )}
+          </div>
+        ))}
+
+        {data.detection && (
+          <>
+            <h2 id="detection">Detection and monitoring in production</h2>
+            <p>{data.detection}</p>
+            <Sentry variant="inline" context={data.category} />
+          </>
+        )}
+
+        <RelatedErrors slugs={data.related} exclude={data.slug} />
+
+        <FAQ items={data.faq} />
+
+        {data.escalate && (
+          <section class="mt-10">
+            <h2 id="escalate">When to escalate to {serviceName} support</h2>
+            <p>{data.escalate}</p>
+          </section>
+        )}
+
+        {data.relatedGuide && (
+          <p class="mt-8 text-sm text-[color:var(--color-text-muted)]">
+            Read more: <a href={`/guide/${data.relatedGuide}/`} class="text-[color:var(--color-accent)] underline">/guide/{data.relatedGuide}/</a>
+          </p>
+        )}
+      </article>
+
+      <Sentry variant="rail" context={data.category} />
+    </div>
+  </div>
+</BaseLayout>

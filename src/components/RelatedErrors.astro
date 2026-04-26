@@ -1,0 +1,32 @@
+---
+import { getCollection } from 'astro:content';
+
+interface Props {
+  slugs: string[];
+  exclude?: string;
+}
+const { slugs, exclude } = Astro.props;
+const all = await getCollection('errors');
+const items = slugs
+  .map((slug) => all.find((e) => e.data.slug === slug))
+  .filter((e): e is NonNullable<typeof e> => Boolean(e) && e!.data.slug !== exclude);
+---
+{items.length > 0 && (
+  <section class="mt-10">
+    <h2 class="text-xl font-semibold tracking-tight mb-4">Related errors</h2>
+    <ul class="grid grid-cols-1 md:grid-cols-2 gap-3 not-prose">
+      {items.map((e) => (
+        <li>
+          <a
+            href={`/${e.data.service}/${e.data.code.toLowerCase().replace(/[^a-z0-9]+/g, '-')}/`}
+            class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-3 hover:border-[color:var(--color-accent)] transition-colors"
+          >
+            <div class="text-xs font-mono text-[color:var(--color-text-dim)] uppercase tracking-wider">{e.data.service}</div>
+            <div class="font-mono text-sm text-[color:var(--color-accent)] mt-0.5">{e.data.code}</div>
+            <div class="text-sm text-[color:var(--color-text-muted)] mt-1 line-clamp-2">{e.data.tldrCause}</div>
+          </a>
+        </li>
+      ))}
+    </ul>
+  </section>
+)}

@@ -1,0 +1,139 @@
+---
+service: aws
+code: AccessDeniedException
+slug: access-denied-exception
+title: 'AWS Error: AccessDeniedException — IAM Permission Denied (Cause + Fix)'
+plainTitle: IAM Permission Denied
+httpStatus: 403
+category: permission
+severity: high
+tldrCause: The IAM principal (user, role, or assumed role) making the request does not have an `Allow` statement for the action and resource being called, or an explicit `Deny` somewhere in the evaluation chain blocks it.
+tldrFix: Read the full error message — it tells you the principal ARN, the action, and the resource. Add a matching `Allow` statement to the principal's policy, then make sure no SCP, permission boundary, or resource policy is denying the same call.
+contextCode:
+  language: text
+  filename: stderr
+  code: |
+    An error occurred (AccessDeniedException) when calling the GetObject operation:
+    User: arn:aws:iam::123456789012:user/deploy-bot is not authorized to perform:
+    s3:GetObject on resource: "arn:aws:s3:::my-prod-bucket/config.json"
+    because no identity-based policy allows the s3:GetObject action
+  caption: "Every AccessDeniedException tells you the principal, the action, and the resource. Read it before guessing."
+causes:
+  - title: No identity-based policy grants the action
+    body: "The IAM user or role attached to the request has no policy that includes an `Allow` for the specific action (e.g., `s3:GetObject`) on the specific resource. AWS denies by default — silence is denial."
+  - title: Explicit Deny in an SCP, permission boundary, or session policy
+    body: "Even if the identity policy says Allow, an Organizations SCP, a permission boundary, or an `AssumeRole` session policy can override with an explicit Deny. The error message will say `with an explicit deny in a service control policy` or similar — read it carefully."
+  - title: Resource policy blocks the principal
+    body: "S3 bucket policies, KMS key policies, SNS topic policies, and Lambda resource policies can deny access independent of the caller's IAM. Cross-account calls require BOTH the caller's IAM AND the resource policy to allow the action."
+  - title: Wrong region or partition in the resource ARN
+    body: "Policies that use `arn:aws:s3:::bucket/*` won't match `arn:aws-cn:s3:::bucket/*` (China) or `arn:aws-us-gov:...` (GovCloud). For regional services, an ARN with the wrong region in a `Resource` block silently fails to match."
+  - title: Condition keys not satisfied
+    body: "Conditions like `aws:SourceVpc`, `aws:PrincipalTag`, `s3:RequestObjectTag`, or MFA requirements (`aws:MultiFactorAuthPresent`) can cause an Allow to evaluate to false. The denied request matched the action and resource but failed a condition."
+fixes:
+  - title: Read the error message — it names the missing permission
+    likelihood: high
+    body: |
+      Modern AWS error messages include the principal ARN, the exact action, the resource ARN, and often the policy type that caused the deny (`identity-based policy`, `resource-based policy`, `permission boundary`, `service control policy`). Copy those three values straight into a new policy statement.
+    code:
+      language: json
+      filename: deploy-bot-policy.json
+      code: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowConfigRead",
+              "Effect": "Allow",
+              "Action": "s3:GetObject",
+              "Resource": "arn:aws:s3:::my-prod-bucket/config.json"
+            }
+          ]
+        }
+  - title: Use IAM Access Analyzer or the policy simulator to confirm
+    likelihood: high
+    body: |
+      Before redeploying, run the IAM Policy Simulator or `aws accessanalyzer` against your draft policy with the exact principal, action, and resource. It surfaces SCP and boundary denies that the console hides.
+    code:
+      language: bash
+      filename: simulate.sh
+      code: |
+        aws iam simulate-principal-policy \
+          --policy-source-arn arn:aws:iam::123456789012:user/deploy-bot \
+          --action-names s3:GetObject \
+          --resource-arns arn:aws:s3:::my-prod-bucket/config.json
+  - title: Check resource policies for cross-account or service-to-service calls
+    likelihood: medium
+    body: |
+      Cross-account S3, KMS, and SNS calls need both sides to allow. Add the calling principal to the resource's policy, and don't forget KMS — encrypted S3 objects require `kms:Decrypt` on the key as well as `s3:GetObject` on the bucket.
+    code:
+      language: json
+      filename: bucket-policy.json
+      code: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowCrossAccountRead",
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:aws:iam::123456789012:role/deploy-bot" },
+              "Action": "s3:GetObject",
+              "Resource": "arn:aws:s3:::my-prod-bucket/*"
+            }
+          ]
+        }
+  - title: Inspect the assumed role's session policy
+    likelihood: medium
+    body: |
+      `sts:AssumeRole` can attach a session policy that scopes down the role's permissions. If your role has `s3:*` but you assumed it with a session policy of `s3:ListBucket` only, GetObject will deny. Log the session policy at the call site to debug.
+  - title: Turn on CloudTrail and search for the exact denied call
+    likelihood: low
+    body: |
+      CloudTrail event `errorCode: AccessDenied` records the principal, action, resource, and the policy type that denied the call. Filter by `userIdentity.arn` and `eventName` to find the exact deny event and confirm whether it was identity-based, resource-based, or SCP-based.
+detection: |
+  Alarm on `AccessDenied` events in CloudTrail at higher than baseline rates. A spike usually means a recent IAM change, a new SCP, or a rotated role that lost a policy attachment. Tag your CloudWatch alarm with the principal ARN so you know which service is degraded.
+related:
+  - throttling-exception-aws
+  - no-such-bucket-aws
+  - 403-rate-limit-github
+  - signature-does-not-match-aws
+  - invalid-client-token-aws
+relatedHttp: 403
+relatedGuide: aws-iam-debugging
+faq:
+  - q: What's the difference between AccessDenied and AccessDeniedException?
+    a: '`AccessDenied` is the S3-specific REST error code; `AccessDeniedException` is the standardised exception used by most other AWS services (Lambda, DynamoDB, KMS, etc.). Both indicate the same underlying problem — IAM evaluation returned Deny — and both have HTTP status 403.'
+  - q: Why does the AccessDeniedException message sometimes hide the reason?
+    a: 'For sensitive resources, AWS may suppress the explanatory portion (e.g., it won''t say which SCP denied you across an Organizations boundary). Enable CloudTrail data events and check the `errorMessage` field there — it often contains more detail than the API response.'
+  - q: I added the policy but still get AccessDeniedException. What''s going on?
+    a: 'Three usual culprits: (1) IAM is eventually consistent — wait 30-60 seconds after attaching, (2) a permission boundary or SCP is denying despite your Allow, or (3) the policy is attached to a different principal than the one making the call. Print the caller identity (`aws sts get-caller-identity`) at the call site to confirm.'
+  - q: Does `Effect: Deny` always win over `Effect: Allow`?
+    a: 'Yes. AWS policy evaluation is "explicit deny wins, then default deny, then explicit allow." A single Deny anywhere in the evaluation chain (identity policy, resource policy, SCP, boundary, session policy) blocks the request even with multiple Allows.'
+  - q: 'Can `s3:*` in my policy still produce AccessDeniedException for s3:GetObject?'
+    a: 'Yes — if the bucket policy or KMS key policy denies, if your permission boundary doesn''t include s3:GetObject, or if the object is encrypted with a KMS key your role can''t decrypt. `s3:*` only grants S3 actions; it does not grant `kms:Decrypt`.'
+  - q: How do I debug an SCP-based AccessDeniedException without org-admin access?
+    a: 'You can''t see SCP contents without org-admin, but you can confirm an SCP is the cause: the error message will explicitly say `with an explicit deny in a service control policy`. Escalate to your AWS Organizations admin with the principal ARN, action, and resource to get the SCP exception added.'
+  - q: Why do I get AccessDeniedException calling KMS even though my role has full S3 access?
+    a: 'S3 server-side encryption with KMS (SSE-KMS) requires `kms:Decrypt` on the KMS key — separate from S3 permissions. The KMS key policy must also allow your principal. Add `kms:Decrypt` and `kms:GenerateDataKey` for write paths.'
+  - q: Are there tools that automatically suggest the missing IAM policy?
+    a: 'Yes. IAM Access Analyzer''s policy generation feature watches CloudTrail for 90 days and emits a least-privilege policy. The IAM console''s "last accessed" data shows which actions a role actually used. Both are better than guessing or copying overly broad templates.'
+escalate: |
+  Escalate to your AWS account or org admin if (a) the error message points at an SCP you don't control, (b) a permission boundary you didn't create blocks the call, or (c) you've reproduced the deny with the IAM Policy Simulator and confirmed all your policies allow but CloudTrail still shows Deny — that's a service-side bug worth a support case with the request ID.
+languages:
+  - python
+  - javascript
+  - go
+  - java
+keywords:
+  - aws accessdeniedexception
+  - aws iam permission denied
+  - aws 403 forbidden
+  - aws s3 access denied
+  - aws assumeRole denied
+quality: curated
+publishedAt: 2026-04-26
+updatedAt: 2026-04-26
+---
+
+`AccessDeniedException` is AWS's universal "your IAM principal cannot do this" response. It's HTTP 403 with a structured message that almost always names the principal, the action, and the resource. The fix is rarely to grant `*:*` — it's to read the message, find the gap, and add a tightly-scoped `Allow` for the exact action the caller needs.
+
+The single most useful debugging habit is to log `aws sts get-caller-identity` at the start of every failing code path. It tells you the actual principal ARN AWS is evaluating, which is often different from what you expected — especially when running on EC2 (instance profile), Lambda (execution role), or after `AssumeRole` chains.

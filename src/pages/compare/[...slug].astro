@@ -1,0 +1,113 @@
+---
+import { getCollection, render } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumb from '../../components/Breadcrumb.astro';
+import { canonical } from '../../lib/seo';
+import { breadcrumbSchema, techArticleSchema } from '../../lib/schema';
+
+export async function getStaticPaths() {
+  const comparisons = await getCollection('comparisons');
+  return comparisons.map((c) => ({
+    params: { slug: c.data.slug },
+    props: { entry: c },
+  }));
+}
+
+const { entry } = Astro.props;
+const data = entry.data;
+const { Content } = await render(entry);
+
+const services = await getCollection('services');
+const sA = services.find((s) => s.data.id === data.serviceA);
+const sB = services.find((s) => s.data.id === data.serviceB);
+
+const path = `/compare/${data.slug}/`;
+const url = canonical(path);
+
+const breadcrumb = [
+  { name: 'Home', url: '/' },
+  { name: 'Compare', url: '/compare/' },
+  { name: data.title },
+];
+
+const jsonLd = [
+  breadcrumbSchema(breadcrumb),
+  techArticleSchema({
+    headline: data.title,
+    description: data.description,
+    url,
+    datePublished: data.publishedAt,
+  }),
+];
+---
+<BaseLayout title={data.title} description={data.description} path={path} jsonLd={jsonLd}>
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <Breadcrumb items={breadcrumb} />
+
+    <header class="mb-8">
+      <h1 class="text-3xl md:text-4xl font-bold tracking-tight mb-3">{data.title}</h1>
+      <p class="text-lg text-[color:var(--color-text-muted)] leading-relaxed">{data.intro}</p>
+    </header>
+
+    {sA && sB && (
+      <section class="mb-10 grid grid-cols-2 gap-4">
+        <a href={`/${sA.data.id}/`} class="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-5 hover:border-[color:var(--color-accent)]">
+          <div class="text-xs uppercase tracking-wider text-[color:var(--color-text-dim)] mb-1">Service A</div>
+          <div class="text-xl font-bold mb-1">{sA.data.name}</div>
+          <div class="text-sm text-[color:var(--color-text-muted)]">{sA.data.tagline}</div>
+        </a>
+        <a href={`/${sB.data.id}/`} class="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-5 hover:border-[color:var(--color-accent)]">
+          <div class="text-xs uppercase tracking-wider text-[color:var(--color-text-dim)] mb-1">Service B</div>
+          <div class="text-xl font-bold mb-1">{sB.data.name}</div>
+          <div class="text-sm text-[color:var(--color-text-muted)]">{sB.data.tagline}</div>
+        </a>
+      </section>
+    )}
+
+    <section class="mb-10">
+      <h2 class="text-xl font-semibold tracking-tight mb-4">Key differences</h2>
+      <div class="overflow-x-auto rounded-lg border border-[color:var(--color-border)]">
+        <table class="w-full text-sm">
+          <thead class="bg-[color:var(--color-bg-elev)]">
+            <tr>
+              <th class="text-left px-4 py-2 font-semibold border-b border-[color:var(--color-border)]">Area</th>
+              <th class="text-left px-4 py-2 font-semibold border-b border-[color:var(--color-border)]">{sA?.data.name ?? data.serviceA}</th>
+              <th class="text-left px-4 py-2 font-semibold border-b border-[color:var(--color-border)]">{sB?.data.name ?? data.serviceB}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.keyDifferences.map((d) => (
+              <tr class="border-b border-[color:var(--color-border)] last:border-b-0">
+                <td class="px-4 py-3 align-top font-medium">{d.area}</td>
+                <td class="px-4 py-3 align-top text-[color:var(--color-text-muted)]">{d.a}</td>
+                <td class="px-4 py-3 align-top text-[color:var(--color-text-muted)]">{d.b}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    {data.sharedErrors.length > 0 && (
+      <section class="mb-10">
+        <h2 class="text-xl font-semibold tracking-tight mb-4">Equivalent error codes</h2>
+        <div class="space-y-3">
+          {data.sharedErrors.map((s) => (
+            <div class="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg-card)] p-4">
+              <div class="font-semibold mb-2">{s.pattern}</div>
+              <div class="grid grid-cols-2 gap-3 text-sm">
+                <div><code class="text-[color:var(--color-accent)]">{s.aCode}</code> <span class="text-[color:var(--color-text-dim)]">in {sA?.data.name}</span></div>
+                <div><code class="text-[color:var(--color-accent)]">{s.bCode}</code> <span class="text-[color:var(--color-text-dim)]">in {sB?.data.name}</span></div>
+              </div>
+              {s.note && <div class="text-sm text-[color:var(--color-text-muted)] mt-2">{s.note}</div>}
+            </div>
+          ))}
+        </div>
+      </section>
+    )}
+
+    <article class="prose mt-10">
+      <Content />
+    </article>
+  </div>
+</BaseLayout>
