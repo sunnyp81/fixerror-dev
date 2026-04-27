@@ -115,11 +115,10 @@ fixes:
 detection: |
   Log `X-RateLimit-Remaining` on every response and emit it as a metric. Alarm when remaining drops below 10% of the limit for more than 5 minutes — that's an incoming 403. For GitHub Apps, expose the metric per installation so you can see which one is the heavy user.
 related:
-  - 422-validation-failed-github
-  - access-denied-exception-aws
-  - throttling-exception-aws
-  - rate-limit-exceeded-openai
-  - secondary-rate-limit-github
+  - 422-validation-failed
+  - access-denied-exception
+  - throttling-exception
+  - rate-limit-exceeded
 relatedHttp: 429
 relatedGuide: handling-rate-limits
 faq:
@@ -159,4 +158,4 @@ updatedAt: 2026-04-26
 
 GitHub's 403 with `X-RateLimit-Remaining: 0` is the most common production blocker for any code that talks to the GitHub API. The fix is rarely "wait longer" — it's almost always one of: authenticate, use conditional requests, switch to GraphQL, or upgrade from PAT to GitHub App. Each move multiplies your effective quota by 5-100x.
 
-The single highest-leverage habit is conditional requests with ETags. Most GitHub data (repo metadata, branch SHAs, label lists) changes rarely. A naive integration that re-reads the same resource every minute spends 60 calls/hour per resource; the same code with `If-None-Match` spends maybe 3-5 because most reads return 304. That alone takes you from constant throttling to a comfortable margin.
+The single biggest win is conditional requests with ETags. Most GitHub data (repo metadata, branch SHAs, label lists) changes rarely. A naive integration that re-reads the same resource every minute spends 60 calls/hour per resource; the same code with `If-None-Match` spends maybe 3-5 because most reads return 304. That alone takes you from constant throttling to a comfortable margin.

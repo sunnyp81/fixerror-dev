@@ -115,11 +115,11 @@ fixes:
 detection: |
   In CI, EADDRINUSE in a parallel test suite is almost always two test files binding the same hardcoded port. Always use port 0 in tests. In production: EADDRINUSE during boot indicates the previous container didn't release the port (shared host-network mode) or your orchestrator restarted the pod faster than TIME_WAIT cleared. Set `tcp_tw_reuse=1` on Linux hosts that hit this often, or add a 30s readiness delay.
 related:
-  - econnrefused-nodejs
-  - err-require-esm-nodejs
-  - heap-out-of-memory-nodejs
-  - module-not-found-nextjs
-  - function-invocation-timeout-nextjs
+  - econnrefused
+  - err-require-esm
+  - heap-out-of-memory
+  - module-not-found
+  - function-invocation-timeout
 relatedGuide: nodejs-process-management
 faq:
   - q: How do I find which process is using port 3000?

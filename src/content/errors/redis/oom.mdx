@@ -83,11 +83,8 @@ fixes:
 detection: |
   Alarm on `used_memory / maxmemory > 0.85` for 5 minutes. Monitor `evicted_keys` rate — a non-zero baseline is normal under LRU policies, but a sudden spike means a flood of new keys is pushing out hot data. For replication setups, alarm on `master_repl_offset - slave_repl_offset` widening — replication lag often precedes OOM as buffers fill.
 related:
-  - wrongtype-redis
-  - readonly-redis
-  - busy-redis-script
-  - max-clients-redis
-  - 53300-too-many-connections-postgres
+  - wrongtype
+  - 53300-too-many-connections
 relatedGuide: redis-error-codes
 faq:
   - q: 'What''s the difference between Redis OOM and OS OOM-killer?'

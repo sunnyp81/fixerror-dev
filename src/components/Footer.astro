@@ -1,4 +1,6 @@
 ---
+import { getCollection } from 'astro:content';
+
 const topServices = [
   { id: 'stripe', name: 'Stripe' },
   { id: 'aws', name: 'AWS' },
@@ -16,14 +18,10 @@ const topServices = [
 
 const httpCodes = [400, 401, 403, 404, 408, 409, 422, 429, 500, 502, 503, 504];
 
-const guides = [
-  { slug: 'retry-strategies', name: 'Retry strategies' },
-  { slug: 'exponential-backoff', name: 'Exponential backoff' },
-  { slug: 'idempotency-keys', name: 'Idempotency keys' },
-  { slug: 'circuit-breakers', name: 'Circuit breakers' },
-  { slug: 'rate-limit-debugging', name: 'Debug rate limits' },
-  { slug: 'error-monitoring-101', name: 'Error monitoring 101' },
-];
+const guides = (await getCollection('guides'))
+  .map((g) => ({ slug: g.data.slug, name: g.data.title }))
+  .sort((a, b) => a.name.localeCompare(b.name))
+  .slice(0, 6);
 
 const year = new Date().getFullYear();
 ---

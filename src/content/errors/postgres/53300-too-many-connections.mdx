@@ -94,11 +94,9 @@ fixes:
 detection: |
   Alarm on Postgres `pg_stat_database.numbackends / max_connections > 0.8`. Track idle-in-transaction count separately — sustained non-zero values indicate a code bug. CloudWatch (RDS) and Datadog both expose these metrics out of the box. Page on saturation, not on individual 53300 events; one event during deploys is normal, sustained 53300 is critical.
 related:
-  - econnrefused-postgres
-  - 23505-unique-violation-postgres
-  - 40p01-deadlock-detected-postgres
-  - connection-terminated-unexpectedly-postgres
-  - statement-timeout-postgres
+  - econnrefused
+  - 23505-unique-violation
+  - 40p01-deadlock-detected
 relatedGuide: database-connection-debugging
 faq:
   - q: What''s the difference between 53300 and ECONNREFUSED?

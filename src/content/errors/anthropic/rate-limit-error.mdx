@@ -170,6 +170,6 @@ publishedAt: 2026-04-26
 updatedAt: 2026-04-26
 ---
 
-`rate_limit_error` is Anthropic's HTTP 429 with the structured error type `rate_limit_error`. Unlike OpenAI, Anthropic enforces three independent per-minute dimensions — RPM, ITPM (input tokens per minute), and OTPM (output tokens per minute) — and you can saturate any one of them without coming close to the others. The error message and headers tell you which dimension hit the wall, which is the key to fixing it.
+`rate_limit_error` is Anthropic's HTTP 429 with the structured error type `rate_limit_error`. Unlike OpenAI, Anthropic enforces three independent per-minute dimensions — RPM, ITPM (input tokens per minute), and OTPM (output tokens per minute) — and you can saturate any one of them without coming close to the others. The error message and headers tell you which dimension hit the wall — the right fix depends on which one.
 
 The right cure depends on which dimension you're hitting. RPM-bound? Smooth your bursts with a token bucket and consider parallel batches. ITPM-bound? Add prompt caching on stable prefixes — it's a 10x reduction on cached reads. OTPM-bound? Cap `max_tokens` more aggressively and stream summaries instead of full essays. And for any sustained production workload, the Message Batches API is a separate, larger capacity pool that absorbs throughput at half the cost.

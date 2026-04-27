@@ -9,7 +9,10 @@ export default defineConfig({
   integrations: [
     mdx(),
     sitemap({
-      filter: (page) => !page.includes('/draft/'),
+      filter: (page) =>
+        !page.includes('/draft/') &&
+        !page.includes('/search') &&
+        !page.includes('/404'),
       changefreq: 'weekly',
       priority: 0.7,
       entryLimit: 5000,

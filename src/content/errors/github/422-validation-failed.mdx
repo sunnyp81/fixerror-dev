@@ -110,11 +110,9 @@ fixes:
 detection: |
   Tag 422 errors by `errors[0].resource` + `errors[0].code` so they cluster in your error tracker. Most 422s are bugs in your client code (you should never see them in steady state). A spike usually means a deployed schema change in your code or a deprecation in GitHub's API.
 related:
-  - 403-rate-limit-github
-  - secondary-rate-limit-github
-  - access-denied-exception-aws
-  - card-declined-stripe
-  - validation-error-stripe
+  - 403-rate-limit
+  - access-denied-exception
+  - card-declined
 relatedHttp: 422
 relatedGuide: github-api-errors
 faq:

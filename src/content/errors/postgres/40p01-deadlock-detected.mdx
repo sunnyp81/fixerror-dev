@@ -103,11 +103,9 @@ fixes:
 detection: |
   Track 40P01 as a separate metric from generic SQL errors. A non-zero baseline (a few per hour) is normal in busy OLTP systems with retry logic. A spike usually correlates with a deploy that changed transaction shape — cross-reference with deploy timestamps. The Postgres log captures both transactions; mine it for the most common deadlocking SQL pair.
 related:
-  - 23505-unique-violation-postgres
-  - 53300-too-many-connections-postgres
-  - econnrefused-postgres
-  - serialization-failure-postgres
-  - statement-timeout-postgres
+  - 23505-unique-violation
+  - 53300-too-many-connections
+  - econnrefused
 relatedGuide: postgres-error-codes
 faq:
   - q: 'Is a deadlock a Postgres bug?'

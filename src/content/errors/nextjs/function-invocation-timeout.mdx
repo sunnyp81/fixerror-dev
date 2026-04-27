@@ -3,7 +3,7 @@ service: nextjs
 code: FUNCTION_INVOCATION_TIMEOUT
 slug: function-invocation-timeout
 title: "Next.js Error: FUNCTION_INVOCATION_TIMEOUT — Serverless Function Timed Out (Cause + Fix)"
-plainTitle: Function Invocation Timeout
+plainTitle: Timed Out
 httpStatus: 504
 category: runtime
 severity: high
@@ -120,11 +120,11 @@ fixes:
 detection: |
   Track 504s in your error monitor with the `x-vercel-id` value attached so you can pull the exact invocation log. Add p95 + p99 latency dashboards per route — a function that took 1s last week and 9s today is about to start timing out, which is much easier to fix proactively than reactively. Alert when p95 exceeds 70% of your `maxDuration`.
 related:
-  - hydration-failed-nextjs
-  - module-not-found-nextjs
-  - econnrefused-nodejs
-  - heap-out-of-memory-nodejs
-  - rate-limit-exceeded-openai
+  - hydration-failed
+  - module-not-found
+  - econnrefused
+  - heap-out-of-memory
+  - rate-limit-exceeded
 relatedHttp: 504
 relatedGuide: vercel-function-timeouts
 faq:

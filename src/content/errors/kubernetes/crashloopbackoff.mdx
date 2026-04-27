@@ -3,7 +3,7 @@ service: kubernetes
 code: CrashLoopBackOff
 slug: crashloopbackoff
 title: "Kubernetes Error: CrashLoopBackOff — Container Restarting Repeatedly (Cause + Fix)"
-plainTitle: Crash Loop Back Off
+plainTitle: Pod Restart Loop
 category: runtime
 severity: critical
 tldrCause: Your container starts, exits with a non-zero code (or is OOMKilled), the kubelet restarts it, it exits again — repeat. After several quick failures the kubelet enters CrashLoopBackOff, an exponential delay between restart attempts so you don't melt the node.
@@ -138,11 +138,11 @@ fixes:
 detection: |
   Alert on `kube_pod_container_status_restarts_total` rate (Prometheus + kube-state-metrics) — a pod restarting more than ~5 times in 10 minutes is in or near CrashLoopBackOff regardless of the official phase. Pair with an OOMKill alert (`container_oom_events_total`). Track CrashLoopBackOff incidents by deployment to spot bad releases fast — a fresh deploy that immediately CrashLoops should auto-rollback.
 related:
-  - imagepullbackoff-kubernetes
-  - heap-out-of-memory-nodejs
-  - econnrefused-nodejs
-  - module-not-found-error-python
-  - function-invocation-timeout-nextjs
+  - imagepullbackoff
+  - heap-out-of-memory
+  - econnrefused
+  - module-not-found-error
+  - function-invocation-timeout
 relatedGuide: kubernetes-pod-debugging
 faq:
   - q: What's the back-off interval in CrashLoopBackOff?

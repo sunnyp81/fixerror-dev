@@ -104,11 +104,10 @@ fixes:
 detection: |
   Most AWS services emit CloudWatch metrics for throttled requests (e.g., DynamoDB `ThrottledRequests`, Lambda `Throttles`, API Gateway `4XXError`). Alarm on a sustained throttle rate over 1% of total requests in a 5-minute window. Cross-reference with Service Quotas usage metrics to know which limit you're hitting.
 related:
-  - access-denied-exception-aws
-  - no-such-bucket-aws
-  - rate-limit-exceeded-openai
-  - 403-rate-limit-github
-  - too-many-requests-aws
+  - access-denied-exception
+  - no-such-bucket
+  - rate-limit-exceeded
+  - 403-rate-limit
 relatedHttp: 429
 relatedGuide: handling-rate-limits
 faq:

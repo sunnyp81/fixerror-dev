@@ -101,11 +101,11 @@ fixes:
 detection: |
   Wire `next build` into CI on every PR — module-not-found errors are deterministic and always catchable in CI before they hit production. Add a `tsc --noEmit` step alongside; TypeScript catches missing-module errors faster than a full build. For monorepos, run a fresh checkout build (no cache) weekly to catch case-sensitivity bugs before someone's Linux-only deploy fails.
 related:
-  - hydration-failed-nextjs
-  - function-invocation-timeout-nextjs
-  - err-require-esm-nodejs
-  - module-not-found-error-python
-  - econnrefused-nodejs
+  - hydration-failed
+  - function-invocation-timeout
+  - err-require-esm
+  - module-not-found-error
+  - econnrefused
 relatedGuide: nextjs-build-errors
 faq:
   - q: Why does the build pass locally on my Mac but fail on Vercel with module not found?

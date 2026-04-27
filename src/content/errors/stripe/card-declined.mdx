@@ -92,10 +92,9 @@ detection: |
   Set up a Stripe webhook for `payment_intent.payment_failed` and log `last_payment_error.decline_code` to your error monitoring. Track decline rate over rolling 24-hour and 7-day windows; a sudden spike usually means a fraud rule change or a misconfigured webhook is preventing legitimate charges.
 related:
   - insufficient-funds
-  - expired-card
   - authentication-required
-  - rate-limit-error-stripe
-  - signature-verification-failed-stripe
+  - rate-limit-error
+  - signature-verification-failed
 relatedHttp: 402
 relatedGuide: handling-payment-declines
 faq:

@@ -114,11 +114,11 @@ fixes:
 detection: |
   Add `python -c "import myapp; import otherdeps"` as a smoke test in CI on every PR — ModuleNotFoundError is deterministic and trivially catchable. For Docker images, run the smoke test as a `RUN` in the build (not just at container startup) so a missing dep fails the build, not the deploy. Track ModuleNotFoundError in production logs by exception class; in healthy services it should be zero.
 related:
-  - module-not-found-nextjs
-  - err-require-esm-nodejs
-  - econnrefused-nodejs
-  - imagepullbackoff-kubernetes
-  - crashloopbackoff-kubernetes
+  - module-not-found
+  - err-require-esm
+  - econnrefused
+  - imagepullbackoff
+  - crashloopbackoff
 relatedGuide: python-environment-debugging
 faq:
   - q: I installed the package with pip, why does Python still say no module named?

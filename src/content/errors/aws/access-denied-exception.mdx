@@ -92,11 +92,9 @@ fixes:
 detection: |
   Alarm on `AccessDenied` events in CloudTrail at higher than baseline rates. A spike usually means a recent IAM change, a new SCP, or a rotated role that lost a policy attachment. Tag your CloudWatch alarm with the principal ARN so you know which service is degraded.
 related:
-  - throttling-exception-aws
-  - no-such-bucket-aws
-  - 403-rate-limit-github
-  - signature-does-not-match-aws
-  - invalid-client-token-aws
+  - throttling-exception
+  - no-such-bucket
+  - 403-rate-limit
 relatedHttp: 403
 relatedGuide: aws-iam-debugging
 faq:

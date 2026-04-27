@@ -3,7 +3,7 @@ service: kubernetes
 code: ImagePullBackOff
 slug: imagepullbackoff
 title: "Kubernetes Error: ImagePullBackOff — Cannot Pull Container Image (Cause + Fix)"
-plainTitle: Image Pull Back Off
+plainTitle: Cannot Pull Image
 category: config
 severity: high
 tldrCause: The kubelet failed to pull the container image and is now backing off retry attempts. Underlying error is one of ErrImagePull, ImagePullBackOff is the recovery loop. Causes are almost always image name/tag wrong, registry auth missing, registry rate-limit, or the image genuinely doesn't exist for the node's architecture.
@@ -126,11 +126,11 @@ fixes:
 detection: |
   Track ImagePullBackOff at cluster level — Prometheus + kube-state-metrics exposes `kube_pod_status_reason{reason="ImagePullBackOff"}`. Alert when any pod is in this state for >5 minutes; for production deployments, ImagePullBackOff after a deploy means the rollout will time out and traffic stays on the old version. Also alert on ECR token expiry (use a CronJob to refresh, or migrate to IRSA).
 related:
-  - crashloopbackoff-kubernetes
-  - module-not-found-error-python
-  - module-not-found-nextjs
-  - err-require-esm-nodejs
-  - econnrefused-nodejs
+  - crashloopbackoff
+  - module-not-found-error
+  - module-not-found
+  - err-require-esm
+  - econnrefused
 relatedGuide: kubernetes-image-pull-debugging
 faq:
   - q: What's the difference between ErrImagePull and ImagePullBackOff?

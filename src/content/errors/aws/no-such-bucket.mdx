@@ -95,11 +95,8 @@ fixes:
 detection: |
   Track NoSuchBucket separately from other 4xx S3 errors. A spike on a single bucket usually means a deletion event in another account. A spike across many buckets in one region usually means a misconfigured deploy pinned the wrong region. CloudTrail `s3:DeleteBucket` events let you correlate quickly.
 related:
-  - access-denied-exception-aws
-  - throttling-exception-aws
-  - signature-does-not-match-aws
-  - region-disabled-aws
-  - bucket-already-exists-aws
+  - access-denied-exception
+  - throttling-exception
 relatedHttp: 404
 relatedGuide: aws-s3-debugging
 faq:

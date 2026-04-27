@@ -3,7 +3,7 @@ service: nodejs
 code: ERR_REQUIRE_ESM
 slug: err-require-esm
 title: "Node.js Error: ERR_REQUIRE_ESM — CJS Can't Require an ES Module (Cause + Fix)"
-plainTitle: Cannot Require ESM Module
+plainTitle: Cannot Require ESM
 category: config
 severity: high
 tldrCause: "Your CommonJS file used `require('some-package')` but the package is now ESM-only (its `package.json` has `\"type\": \"module\"` or `\"exports\"` only points to `.mjs`). Node's CJS loader can't synchronously load an ESM module."
@@ -117,11 +117,11 @@ fixes:
 detection: |
   ERR_REQUIRE_ESM is a startup error — it crashes your process before any traffic flows. CI catches it if you run the full app on every PR. For dependency upgrades, use `npm outdated` and read the changelog of every major bump; ESM-only is almost always called out. Renovate/Dependabot can be configured to pin majors and require manual review for the ones that go ESM.
 related:
-  - econnrefused-nodejs
-  - eaddrinuse-nodejs
-  - heap-out-of-memory-nodejs
-  - module-not-found-nextjs
-  - module-not-found-error-python
+  - econnrefused
+  - eaddrinuse
+  - heap-out-of-memory
+  - module-not-found
+  - module-not-found-error
 relatedGuide: nodejs-esm-migration
 faq:
   - q: Why did my code suddenly start throwing ERR_REQUIRE_ESM after npm install?

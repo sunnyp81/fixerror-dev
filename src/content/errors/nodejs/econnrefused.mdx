@@ -131,11 +131,11 @@ fixes:
 detection: |
   Differentiate "service is down" from "this one instance can't reach the service" in your monitoring. Tag ECONNREFUSED logs with the source instance ID and the target host:port. If 1 instance fails while 99 succeed, that instance has a network issue (bad SG, bad route). If all 100 instances fail simultaneously, the target is down. The latter is much more urgent. Track ECONNREFUSED rate per target as a gauge, not just a count.
 related:
-  - eaddrinuse-nodejs
-  - err-require-esm-nodejs
-  - heap-out-of-memory-nodejs
-  - econnrefused-postgres
-  - function-invocation-timeout-nextjs
+  - eaddrinuse
+  - err-require-esm
+  - heap-out-of-memory
+  - econnrefused
+  - function-invocation-timeout
 relatedGuide: nodejs-network-debugging
 faq:
   - q: What's the difference between ECONNREFUSED and ETIMEDOUT?

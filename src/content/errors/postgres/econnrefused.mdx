@@ -95,11 +95,7 @@ fixes:
 detection: |
   Health-check against Postgres at the network layer (`pg_isready`) and the SQL layer (`SELECT 1`) separately. Alert on the network check first — that's a different failure (network/host) from the SQL check (auth/permission/lock). Track ECONNREFUSED rate per app instance; a single instance failing while others succeed points at that instance's network rather than Postgres being down.
 related:
-  - too-many-connections
-  - password-authentication-failed
-  - ssl-required
-  - connection-terminated-unexpectedly
-  - 53300-too-many-connections-postgres
+  - 53300-too-many-connections
 relatedHttp: 503
 relatedGuide: database-connection-debugging
 faq:

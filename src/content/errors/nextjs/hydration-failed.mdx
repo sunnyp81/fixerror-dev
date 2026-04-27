@@ -103,11 +103,9 @@ fixes:
 detection: |
   Hydration errors are loud in development (red overlay) but silent in production by default — the console logs a generic message and React falls back to a full re-render, costing TTI and CLS. Add `onRecoverableError` to your `hydrateRoot` (or use Sentry's `BrowserTracing` with React error boundaries) so production hydration mismatches show up in your error tracker. Track hydration error rate as a Core Web Vitals adjacent metric.
 related:
-  - module-not-found-nextjs
-  - function-invocation-timeout-nextjs
-  - failed-to-fetch-nextjs
-  - next-image-error
-  - econnrefused-nodejs
+  - module-not-found
+  - function-invocation-timeout
+  - econnrefused
 relatedGuide: nextjs-debugging
 faq:
   - q: Why does hydration only fail in production and not in development?

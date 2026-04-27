@@ -18,16 +18,19 @@ import {
 export async function getStaticPaths() {
   const errors = await getCollection('errors');
   const services = await getCollection('services');
+  const guides = await getCollection('guides');
+  const guideSlugs = new Set(guides.map((g) => g.data.slug));
   return errors.map((e) => {
     const service = services.find((s) => s.data.id === e.data.service);
+    const guideExists = e.data.relatedGuide ? guideSlugs.has(e.data.relatedGuide) : false;
     return {
       params: { service: e.data.service, code: e.data.slug },
-      props: { entry: e, service },
+      props: { entry: e, service, guideExists },
     };
   });
 }
 
-const { entry, service } = Astro.props;
+const { entry, service, guideExists } = Astro.props;
 const data = entry.data;
 const { Content } = await render(entry);
 
@@ -150,7 +153,7 @@ const jsonLd = [
           </section>
         )}
 
-        {data.relatedGuide && (
+        {data.relatedGuide && guideExists && (
           <p class="mt-8 text-sm text-[color:var(--color-text-muted)]">
             Read more: <a href={`/guide/${data.relatedGuide}/`} class="text-[color:var(--color-accent)] underline">/guide/{data.relatedGuide}/</a>
           </p>

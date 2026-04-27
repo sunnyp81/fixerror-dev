@@ -3,7 +3,7 @@ service: nodejs
 code: heap_out_of_memory
 slug: heap-out-of-memory
 title: "Node.js Error: JavaScript heap out of memory — V8 Heap Exhausted (Cause + Fix)"
-plainTitle: JavaScript Heap Out of Memory
+plainTitle: Heap Out of Memory
 category: runtime
 severity: critical
 tldrCause: V8's old-generation heap filled up and the garbage collector couldn't free enough space, so V8 aborts the process with a fatal allocation failure. Default heap is ~4GB on 64-bit; long-lived references (caches, listeners, closures, big arrays) prevent reclamation.
@@ -101,11 +101,11 @@ fixes:
 detection: |
   Track Node's `process.memoryUsage().heapUsed` and `heapTotal` as gauges in your APM. Healthy services have a sawtooth pattern (GC reclaims regularly); leaking services trend upward without dropping back. Alert on heapUsed > 80% of max_old_space_size for over 5 minutes. Use `--heapsnapshot-near-heap-limit=N` in production to capture N snapshots automatically before the crash — invaluable for post-mortems.
 related:
-  - econnrefused-nodejs
-  - eaddrinuse-nodejs
-  - err-require-esm-nodejs
-  - function-invocation-timeout-nextjs
-  - module-not-found-error-python
+  - econnrefused
+  - eaddrinuse
+  - err-require-esm
+  - function-invocation-timeout
+  - module-not-found-error
 relatedGuide: nodejs-memory-debugging
 faq:
   - q: Will increasing `--max-old-space-size` actually fix the error?

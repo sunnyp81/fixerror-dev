@@ -99,11 +99,9 @@ fixes:
 detection: |
   Track 23505 separately from generic SQL errors — most are expected (idempotent retries) and should not page. Alarm only when 23505 fires on a constraint that's *meant* to be exclusive (e.g., `payments_idempotency_key_key`) and the upstream caller is supposed to be passing a unique key. Tag by constraint name in your error tracker.
 related:
-  - econnrefused-postgres
-  - 53300-too-many-connections-postgres
-  - 40p01-deadlock-detected-postgres
-  - foreign-key-violation-postgres
-  - serialization-failure-postgres
+  - econnrefused
+  - 53300-too-many-connections
+  - 40p01-deadlock-detected
 relatedGuide: postgres-error-codes
 faq:
   - q: 'What''s the difference between 23505 and 23503?'

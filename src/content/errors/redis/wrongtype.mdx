@@ -102,11 +102,8 @@ fixes:
 detection: |
   Surface WRONGTYPE as its own metric — it's almost always a bug, never a transient. A single occurrence in production warrants investigation. Tag by key prefix in your error tracker so you see clusters around specific features. Redis Slowlog and `MONITOR` can capture the offending command sequence during incidents.
 related:
-  - oom-redis
-  - readonly-redis
-  - busy-redis-script
-  - 23505-unique-violation-postgres
-  - max-clients-redis
+  - oom
+  - 23505-unique-violation
 relatedGuide: redis-error-codes
 faq:
   - q: 'Why doesn''t Redis just convert types automatically?'
