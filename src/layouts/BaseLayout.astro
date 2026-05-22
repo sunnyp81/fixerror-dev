@@ -54,6 +54,8 @@ const ogImg = ogImagePath ?? ogImage(path);
     {jsonLd.map((data) => (
       <script type="application/ld+json" set:html={JSON.stringify(data)} />
     ))}
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-CSSCJS4KDL"></script>
+    <script is:inline>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag('js',new Date());gtag('config','G-CSSCJS4KDL');</script>
   </head>
   <body>
     <a href="#main" class="sr-only focus:not-sr-only">Skip to content</a>
