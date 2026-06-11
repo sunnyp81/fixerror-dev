@@ -25,3 +25,16 @@ pnpm-debug.log*
 
 # OS
 Thumbs.db
+
+# leak-scan: appended 2026-05-01
+.env.*
+*.pem
+*.key
+credentials.json
+credentials*.json
+secrets.*
+.wrangler/
+.vercel/
+.next/cache/
+wordpress-config.md
+master-builds.md
